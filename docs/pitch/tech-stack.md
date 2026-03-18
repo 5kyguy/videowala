@@ -8,7 +8,7 @@ This page started as a **recommended pitch stack**. The repo has since implement
 - **Persistence**: SQLite (implemented; auto-migrated on startup)
 - **Frontend**: Vite + React (implemented)
 - **Background jobs**: none yet (index/render run synchronously in-process today)
-- **Vector retrieval**: optional Postgres + pgvector when `stage2_semantic_enabled` is enabled (implemented as a best-effort hook)
+- **Vector retrieval**: Postgres + pgvector (required for semantic search; indexing degrades if DB is down)
 - **Object storage**: not yet (assets are referenced by filesystem path; renders go to `storage/...`)
 
 ```mermaid

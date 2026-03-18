@@ -83,6 +83,6 @@ The tested multimodal prototype is now exposed as `tools/vl_cli.py`, using `Hugg
 
 ## This repository (Stage 1 MVP)
 
-The code here is a **single-process, synchronous** slice of the product above: FastAPI backend, SQLite, Vite + React UI. **Indexing** (`POST /assets`) and **rendering** (`POST /requests/render`) run **inline** in the API—no background workers or queues yet. Optional Stage 2 hooks (OCR, ASR, semantic search) are documented under `docs/`.
+The code here is a **single-process, synchronous** slice of the product above: FastAPI backend, SQLite, Vite + React UI (**Yarn**). **Indexing** (`POST /assets`) and **rendering** (`POST /requests/render`) run **inline** in the API—no background workers or queues yet. OCR, ASR, and semantic indexing/search are always on (Postgres + pgvector for vectors); see `docs/running.md`.
 
 **Technical documentation:** start at [`docs/README.md`](docs/README.md) for links to architecture, data model, API, and how to run locally. Pitch and sizing notes live in [`docs/pitch/`](docs/pitch/).

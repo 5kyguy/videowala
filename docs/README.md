@@ -8,4 +8,8 @@ This folder is implementation-focused: how the Stage 1 synchronous MVP is built 
 
 | Doc | Contents |
 | --- | -------- |
+| [`architecture.md`](architecture.md) | Components, synchronous flows, Mermaid diagrams |
+| [`data-model.md`](data-model.md) | SQLite schema + ER diagram |
+| [`api.md`](api.md) | HTTP endpoints |
+| [`running.md`](running.md) | Run backend + frontend locally |
 | [`pitch/`](pitch/) | Pitch material + future scaling (annotated vs current code) |
