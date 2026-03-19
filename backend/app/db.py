@@ -225,6 +225,16 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 4")
 
+        if version < 5:
+            # PoC dashboard reads grouped event stats frequently.
+            cur.executescript(
+                """
+                CREATE INDEX IF NOT EXISTS idx_render_jobs_tenant_event ON render_jobs(tenant_id, event_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_person_refs_tenant_event ON person_references(tenant_id, event_id, created_at);
+                """
+            )
+            cur.execute("PRAGMA user_version = 5")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)

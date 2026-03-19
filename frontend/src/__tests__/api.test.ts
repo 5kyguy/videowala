@@ -27,4 +27,43 @@ describe("api client", () => {
     const client = createApiClient({ baseUrl: "http://localhost:8000" });
     await expect(client.listEvents("tenant_a")).rejects.toBeInstanceOf(ApiError);
   });
+
+  it("calls event summary endpoint with tenant scope", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          event: {
+            id: "event_1",
+            tenant_id: "tenant_a",
+            title: "Demo",
+            event_type: "wedding",
+            created_at: new Date().toISOString()
+          },
+          stats: {
+            assets_total: 0,
+            images_total: 0,
+            videos_total: 0,
+            has_media: false,
+            persons_total: 0,
+            face_references_total: 0,
+            faces_saved: false,
+            face_match_insights_total: 0,
+            has_face_matches: false,
+            renders_total: 0,
+            renders_queued: 0,
+            renders_running: 0,
+            renders_completed: 0,
+            renders_failed: 0
+          }
+        })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createApiClient({ baseUrl: "http://localhost:8000" });
+    await client.getEventSummary("tenant_a", "event_1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8000/events/event_1/summary?tenant_id=tenant_a",
+      expect.any(Object)
+    );
+  });
 });

@@ -13,6 +13,7 @@ from ..repositories import (
     AssetRepository,
     EventRepository,
     IndexJobRepository,
+    InsightRepository,
     PersonReferenceRepository,
     PersonRepository,
     RenderRepository,
@@ -24,11 +25,14 @@ from ..schemas import (
     ContentRequestCreate,
     Event,
     EventCreate,
+    EventSummary,
+    EventSummaryStats,
     FeedbackUpdate,
     Person,
     PersonCreate,
     PersonReference,
     PersonReferenceCreate,
+    RenderJobList,
 )
 from ..services.faces import face_service
 from ..services.ingest import create_asset_record, discover_media_files, purge_event_proxies, register_asset, resolve_ingest_path
@@ -188,6 +192,52 @@ def event_context(event_id: str, tenant_id: str, insight_type: str | None = None
     return {"event_id": event_id, "context": context}
 
 
+@router.get("/events/{event_id}/summary", response_model=EventSummary)
+def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    assets = AssetRepository.list_for_event(event_id)
+    persons = PersonRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+    references = PersonReferenceRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+    face_match_insights = InsightRepository.list_for_event(event_id=event_id, insight_type="face_matches")
+    renders = RenderRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+
+    images_total = sum(1 for asset in assets if asset.media_type == "image")
+    videos_total = sum(1 for asset in assets if asset.media_type == "video")
+    renders_by_status = {
+        "queued": sum(1 for job in renders if job.status == "queued"),
+        "running": sum(1 for job in renders if job.status == "running"),
+        "completed": sum(1 for job in renders if job.status == "completed"),
+        "failed": sum(1 for job in renders if job.status == "failed"),
+    }
+
+    return EventSummary(
+        event=event,
+        stats=EventSummaryStats(
+            assets_total=len(assets),
+            images_total=images_total,
+            videos_total=videos_total,
+            has_media=bool(assets),
+            persons_total=len(persons),
+            face_references_total=len(references),
+            faces_saved=bool(references),
+            face_match_insights_total=len(face_match_insights),
+            has_face_matches=bool(face_match_insights),
+            renders_total=len(renders),
+            renders_queued=renders_by_status["queued"],
+            renders_running=renders_by_status["running"],
+            renders_completed=renders_by_status["completed"],
+            renders_failed=renders_by_status["failed"],
+        ),
+    )
+
+
 @router.get("/events/{event_id}/search")
 def search_event(event_id: str, tenant_id: str, q: str, limit: int = 20) -> dict:
     event = EventRepository.get(event_id)
@@ -267,6 +317,19 @@ def get_render_job(render_job_id: str, tenant_id: str) -> dict:
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"render_job": job.model_dump()}
+
+
+@router.get("/events/{event_id}/renders", response_model=RenderJobList)
+def list_event_renders(event_id: str, tenant_id: str) -> RenderJobList:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    renders = RenderRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+    return RenderJobList(event_id=event_id, renders=renders)
 
 
 @router.post("/requests/feedback/regenerate")

@@ -1,4 +1,4 @@
-import type { Event, MediaType, OutputType, Person, PersonReference, PlannerPlan, RenderJob } from "./types";
+import type { Event, EventSummary, MediaType, OutputType, Person, PersonReference, PlannerPlan, RenderJob, RenderJobListItem } from "./types";
 
 export type ApiClientConfig = {
   baseUrl: string;
@@ -37,6 +37,16 @@ export function createApiClient(config: ApiClientConfig) {
   return {
     listEvents: (tenantId: string) =>
       request<{ events: Event[] }>(baseUrl, `/events?tenant_id=${encodeURIComponent(tenantId)}`),
+    getEventSummary: (tenantId: string, eventId: string) =>
+      request<EventSummary>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}/summary?tenant_id=${encodeURIComponent(tenantId)}`
+      ),
+    listEventRenders: (tenantId: string, eventId: string) =>
+      request<{ event_id: string; renders: RenderJobListItem[] }>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}/renders?tenant_id=${encodeURIComponent(tenantId)}`
+      ),
     createEvent: (payload: {
       tenant_id: string;
       title: string;

@@ -51,3 +51,27 @@ export type RenderJob = {
   output_path: string | null;
   created_at: string;
 };
+
+export type EventSummaryStats = {
+  assets_total: number;
+  images_total: number;
+  videos_total: number;
+  has_media: boolean;
+  persons_total: number;
+  face_references_total: number;
+  faces_saved: boolean;
+  face_match_insights_total: number;
+  has_face_matches: boolean;
+  renders_total: number;
+  renders_queued: number;
+  renders_running: number;
+  renders_completed: number;
+  renders_failed: number;
+};
+
+export type EventSummary = {
+  event: Event;
+  stats: EventSummaryStats;
+};
+
+export type RenderJobListItem = RenderJob;

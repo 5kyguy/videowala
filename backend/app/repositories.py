@@ -460,6 +460,32 @@ class RenderRepository:
         )
 
     @staticmethod
+    def list_for_event(tenant_id: str, event_id: str) -> list[RenderJob]:
+        with db_cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT * FROM render_jobs
+                WHERE tenant_id = ? AND event_id = ?
+                ORDER BY created_at DESC
+                """,
+                (tenant_id, event_id),
+            ).fetchall()
+        return [
+            RenderJob(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                event_id=row["event_id"],
+                plan_id=row["plan_id"],
+                status=row["status"],
+                output_path=row["output_path"],
+                progress_percent=int(row["progress_percent"]) if "progress_percent" in row.keys() else 0,
+                error_message=row["error_message"] if "error_message" in row.keys() else None,
+                created_at=from_iso(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
     def get_spec(job_id: str) -> dict | None:
         with db_cursor() as cur:
             row = cur.execute("SELECT * FROM render_specs WHERE render_job_id = ?", (job_id,)).fetchone()

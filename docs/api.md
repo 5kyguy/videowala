@@ -20,6 +20,8 @@ Returns `{"status": "ok"}`.
 
 - `POST /events`
 - `GET /events?tenant_id=...`
+- `GET /events/{event_id}/summary?tenant_id=...`
+- `GET /events/{event_id}/renders?tenant_id=...`
 
 Example:
 
@@ -28,6 +30,14 @@ curl -s -X POST http://localhost:8000/events \
   -H 'Content-Type: application/json' \
   -d '{"tenant_id":"tenant_a","title":"Demo Event","event_type":"wedding"}' | jq .
 ```
+
+Event dashboard summary response includes:
+
+- media totals (`assets_total`, image/video split, `has_media`)
+- face readiness (`persons_total`, `face_references_total`, `faces_saved`, face-match counters)
+- render status counters (`renders_total`, queued/running/completed/failed)
+
+Event renders response includes render jobs for that event (latest first), suitable for profile dashboard listing.
 
 ## Assets (register-by-path + index)
 

@@ -1,52 +1,71 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createApiClient, getDefaultApiBaseUrl } from "./api";
-import type { Event, OutputType, Person } from "./types";
+import type { Event, EventSummary, RenderJobListItem } from "./types";
 
-const DEFAULT_OUTPUT_TYPE: OutputType = "highlight_reel";
+const PROFILE_STORAGE_KEY = "videowala_profiles";
 
 function asErrorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    return `HTTP ${error.status}: ${error.message}`;
-  }
-  if (error instanceof Error) {
-    return error.message;
-  }
+  if (error instanceof ApiError) return `HTTP ${error.status}: ${error.message}`;
+  if (error instanceof Error) return error.message;
   return "Unknown error";
+}
+
+function loadProfiles(): string[] {
+  const fallback = ["tenant_a"];
+  const storage = globalThis.localStorage;
+  const raw = typeof storage?.getItem === "function" ? storage.getItem(PROFILE_STORAGE_KEY) : null;
+  if (!raw) return fallback;
+  try {
+    const parsed = JSON.parse(raw) as string[];
+    const cleaned = parsed.map((item) => item.trim()).filter(Boolean);
+    return cleaned.length > 0 ? cleaned : fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export default function App() {
   const [apiBaseUrl, setApiBaseUrl] = useState(getDefaultApiBaseUrl());
   const api = useMemo(() => createApiClient({ baseUrl: apiBaseUrl }), [apiBaseUrl]);
 
-  const [tenantId, setTenantId] = useState("tenant_a");
-  const [eventId, setEventId] = useState("");
+  const [profiles, setProfiles] = useState<string[]>(() => loadProfiles());
+  const [newProfile, setNewProfile] = useState("");
+  const [tenantId, setTenantId] = useState(() => loadProfiles()[0]);
+
   const [events, setEvents] = useState<Event[]>([]);
-  const [persons, setPersons] = useState<Person[]>([]);
-  const [contextJson, setContextJson] = useState("{}");
-  const [planJson, setPlanJson] = useState("{}");
-  const [renderJson, setRenderJson] = useState("{}");
-  const [faceMatchesJson, setFaceMatchesJson] = useState("[]");
-  const [renderVideoSrc, setRenderVideoSrc] = useState<string | null>(null);
+  const [selectedEventId, setSelectedEventId] = useState("");
+  const [summary, setSummary] = useState<EventSummary | null>(null);
+  const [renders, setRenders] = useState<RenderJobListItem[]>([]);
 
   const [eventTitle, setEventTitle] = useState("Demo Event");
   const [eventType, setEventType] = useState("wedding");
-  const [ingestPath, setIngestPath] = useState("media");
-  const [ingestRecursive, setIngestRecursive] = useState(true);
-  const [prompt, setPrompt] = useState("Create a 60-second highlight focused on dancing.");
-  const [durationSeconds, setDurationSeconds] = useState(60);
-  const [includeAssetIds, setIncludeAssetIds] = useState("");
-  const [excludeAssetIds, setExcludeAssetIds] = useState("");
-  const [wantSubtitles, setWantSubtitles] = useState(false);
-  const [wantOverlays, setWantOverlays] = useState(false);
-  const [personName, setPersonName] = useState("Alice");
-  const [personRefPath, setPersonRefPath] = useState("media/20250111_141008.jpg");
-  const [selectedPersonId, setSelectedPersonId] = useState("");
-  const [outputType, setOutputType] = useState<OutputType>(DEFAULT_OUTPUT_TYPE);
+  const [eventVenue, setEventVenue] = useState("");
+  const [eventDate, setEventDate] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState("Ready.");
   const [errorMessage, setErrorMessage] = useState("");
+
+  useEffect(() => {
+    const storage = globalThis.localStorage;
+    if (typeof storage?.setItem === "function") {
+      storage.setItem(PROFILE_STORAGE_KEY, JSON.stringify(profiles));
+    }
+  }, [profiles]);
+
+  useEffect(() => {
+    void refreshEvents();
+  }, [tenantId, apiBaseUrl]);
+
+  useEffect(() => {
+    if (!selectedEventId) {
+      setSummary(null);
+      setRenders([]);
+      return;
+    }
+    void refreshSelectedEvent();
+  }, [selectedEventId, tenantId, apiBaseUrl]);
 
   async function runAction(action: () => Promise<void>) {
     setLoading(true);
@@ -60,392 +79,194 @@ export default function App() {
     }
   }
 
-  function parseIdList(value: string): string[] {
-    return value
-      .split(",")
-      .map((x) => x.trim())
-      .filter(Boolean);
-  }
-
-  async function handleCreateEvent(e: FormEvent) {
-    e.preventDefault();
-    if (!tenantId || !eventTitle || !eventType) {
-      setErrorMessage("tenant_id, title, and event_type are required.");
-      return;
+  function addProfile() {
+    const profile = newProfile.trim();
+    if (!profile) return;
+    if (!profiles.includes(profile)) {
+      setProfiles((prev) => [...prev, profile]);
     }
-    await runAction(async () => {
-      const event = await api.createEvent({ tenant_id: tenantId, title: eventTitle, event_type: eventType });
-      setEventId(event.id);
-      setStatus(`Created event ${event.id}.`);
-      await refreshEvents();
-    });
+    setTenantId(profile);
+    setNewProfile("");
   }
 
   async function refreshEvents() {
     await runAction(async () => {
       const response = await api.listEvents(tenantId);
       setEvents(response.events);
-      if (!eventId && response.events.length > 0) {
-        setEventId(response.events[0].id);
+      if (!response.events.some((event) => event.id === selectedEventId)) {
+        setSelectedEventId(response.events[0]?.id ?? "");
       }
-      setStatus(`Loaded ${response.events.length} events.`);
+      setStatus(`Loaded ${response.events.length} event(s) for ${tenantId}.`);
     });
   }
 
-  async function ingestFromPath() {
-    if (!eventId || !ingestPath.trim()) {
-      setErrorMessage("event_id and path (file or folder) are required.");
+  async function refreshSelectedEvent() {
+    if (!selectedEventId) return;
+    await runAction(async () => {
+      const [eventSummary, eventRenders] = await Promise.all([
+        api.getEventSummary(tenantId, selectedEventId),
+        api.listEventRenders(tenantId, selectedEventId)
+      ]);
+      setSummary(eventSummary);
+      setRenders(eventRenders.renders);
+      setStatus(`Loaded dashboard for ${selectedEventId}.`);
+    });
+  }
+
+  async function handleCreateEvent(e: FormEvent) {
+    e.preventDefault();
+    if (!eventTitle.trim() || !eventType.trim()) {
+      setErrorMessage("Event title and event type are required.");
       return;
     }
     await runAction(async () => {
-      const response = await api.ingestFromPath({
+      const created = await api.createEvent({
         tenant_id: tenantId,
-        event_id: eventId,
-        path: ingestPath.trim(),
-        recursive: ingestRecursive
+        title: eventTitle.trim(),
+        event_type: eventType.trim(),
+        venue: eventVenue.trim() || undefined,
+        date: eventDate.trim() || undefined
       });
-      const totalInsights = response.assets.reduce((s, a) => s + a.insights_generated, 0);
-      setStatus(
-        `Ingested ${response.count} file(s) (${totalInsights} total insight rows). First: ${response.assets[0]?.asset_id ?? "—"}.`
-      );
+      setSelectedEventId(created.id);
+      await refreshEvents();
+      setStatus(`Created event ${created.id} for ${tenantId}.`);
     });
   }
 
-  async function loadContext() {
-    if (!eventId) {
-      setErrorMessage("event_id is required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.getContext(eventId, tenantId);
-      setContextJson(JSON.stringify(response.context, null, 2));
-      setStatus("Loaded event context.");
-    });
-  }
-
-  async function requestPlan() {
-    if (!eventId || !prompt) {
-      setErrorMessage("event_id and prompt are required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.createPlan({
-        tenant_id: tenantId,
-        event_id: eventId,
-        output_type: outputType,
-        prompt,
-        target_duration_seconds: durationSeconds,
-        include_faces: [],
-        include_asset_ids: parseIdList(includeAssetIds),
-        excluded_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
-      });
-      setPlanJson(JSON.stringify(response.plan, null, 2));
-      setStatus("Planner response received.");
-    });
-  }
-
-  async function requestRender() {
-    if (!eventId || !prompt) {
-      setErrorMessage("event_id and prompt are required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.render({
-        tenant_id: tenantId,
-        event_id: eventId,
-        output_type: outputType,
-        prompt,
-        target_duration_seconds: durationSeconds,
-        include_faces: [],
-        include_asset_ids: parseIdList(includeAssetIds),
-        excluded_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
-      });
-      setPlanJson(JSON.stringify(response.plan, null, 2));
-      setRenderJson(JSON.stringify(response.render_job, null, 2));
-      setRenderVideoSrc(`${api.getRenderVideoUrl(response.render_job.id, tenantId)}&t=${Date.now()}`);
-      setStatus(`Render job ${response.render_job.id} is ${response.render_job.status}.`);
-    });
-  }
-
-  async function requestRegenerate() {
-    if (!eventId || !prompt) {
-      setErrorMessage("event_id and prompt are required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.regenerate({
-        tenant_id: tenantId,
-        event_id: eventId,
-        output_type: outputType,
-        prompt,
-        target_duration_seconds: durationSeconds,
-        include_asset_ids: parseIdList(includeAssetIds),
-        exclude_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
-      });
-      setPlanJson(JSON.stringify(response.plan, null, 2));
-      setRenderJson(JSON.stringify(response.render_job, null, 2));
-      setRenderVideoSrc(`${api.getRenderVideoUrl(response.render_job.id, tenantId)}&t=${Date.now()}`);
-      setStatus(`Regenerated; render ${response.render_job.id} is ${response.render_job.status}.`);
-    });
-  }
-
-  async function createPerson() {
-    if (!eventId || !personName) {
-      setErrorMessage("event_id and display name are required.");
-      return;
-    }
-    await runAction(async () => {
-      const created = await api.createPerson({
-        tenant_id: tenantId,
-        event_id: eventId,
-        display_name: personName
-      });
-      setSelectedPersonId(created.id);
-      setStatus(`Created person ${created.id}.`);
-      await loadPersons();
-    });
-  }
-
-  async function loadPersons() {
-    if (!eventId) {
-      setErrorMessage("event_id is required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.listPersons(tenantId, eventId);
-      setPersons(response.persons);
-      if (!selectedPersonId && response.persons.length > 0) {
-        setSelectedPersonId(response.persons[0].id);
-      }
-      setStatus(`Loaded ${response.persons.length} persons.`);
-    });
-  }
-
-  async function addReference() {
-    if (!selectedPersonId || !eventId || !personRefPath) {
-      setErrorMessage("person_id, event_id, and image_path are required.");
-      return;
-    }
-    await runAction(async () => {
-      await api.addPersonReference(selectedPersonId, {
-        tenant_id: tenantId,
-        event_id: eventId,
-        image_path: personRefPath
-      });
-      setStatus("Person reference added.");
-    });
-  }
-
-  async function reindexFaces() {
-    if (!eventId) {
-      setErrorMessage("event_id is required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.reindexFaces(eventId, tenantId);
-      setStatus(`Face reindex done for ${response.asset_count} assets.`);
-    });
-  }
-
-  async function loadFaceMatches() {
-    if (!eventId) {
-      setErrorMessage("event_id is required.");
-      return;
-    }
-    await runAction(async () => {
-      const response = await api.listFaceMatches(eventId, tenantId, selectedPersonId || undefined);
-      setFaceMatchesJson(JSON.stringify(response.matches, null, 2));
-      setStatus("Face matches loaded.");
-    });
-  }
+  const selectedEvent = events.find((event) => event.id === selectedEventId) ?? null;
 
   return (
     <div className="page">
-      <header>
-        <h1>VideoWala MVP Frontend</h1>
-        <p>Simple UI for event ingest, context, planning, rendering, regenerate feedback, and face APIs.</p>
+      <header className="topbar">
+        <div>
+          <h1>VideoWala PoC Dashboard</h1>
+          <p>Profile-based event workspace with event health and render visibility.</p>
+        </div>
+        <label>
+          API base URL
+          <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} />
+        </label>
       </header>
 
       <section className="card">
-        <h2>Connection</h2>
-        <div className="grid">
+        <h2>Profiles</h2>
+        <div className="profiles-row">
           <label>
-            API base URL
-            <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} />
+            Active profile
+            <select value={tenantId} onChange={(e) => setTenantId(e.target.value)}>
+              {profiles.map((profile) => (
+                <option key={profile} value={profile}>
+                  {profile}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
-            Tenant ID
-            <input value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
+            Add profile (tenant_id)
+            <input value={newProfile} onChange={(e) => setNewProfile(e.target.value)} placeholder="tenant_x" />
           </label>
+          <button onClick={addProfile} disabled={loading}>
+            Add + Switch
+          </button>
           <button onClick={() => void refreshEvents()} disabled={loading}>
             Refresh Events
           </button>
         </div>
       </section>
 
-      <section className="card">
-        <h2>Event</h2>
-        <form className="grid" onSubmit={(e) => void handleCreateEvent(e)}>
-          <label>
-            Event title
-            <input value={eventTitle} onChange={(e) => setEventTitle(e.target.value)} />
-          </label>
-          <label>
-            Event type
-            <input value={eventType} onChange={(e) => setEventType(e.target.value)} />
-          </label>
-          <button type="submit" disabled={loading}>
-            Create Event
-          </button>
-          <label>
-            Selected event ID
-            <input value={eventId} onChange={(e) => setEventId(e.target.value)} />
-          </label>
-        </form>
-        <pre>{JSON.stringify(events, null, 2)}</pre>
-      </section>
-
-      <section className="card">
-        <h2>Ingest + Context</h2>
-        <p className="hint">
-          Enter a <strong>file</strong> or <strong>folder</strong> path on the backend host. Images and videos are auto-detected by extension (jpg, png, mp4, mov, …).
-        </p>
-        <div className="grid">
-          <label>
-            Path (file or folder)
-            <input value={ingestPath} onChange={(e) => setIngestPath(e.target.value)} placeholder="e.g. /data/wedding or test/media" />
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={ingestRecursive}
-              onChange={(e) => setIngestRecursive(e.target.checked)}
-            />
-            Include subfolders
-          </label>
-          <button type="button" onClick={() => void ingestFromPath()} disabled={loading}>
-            Ingest all media
-          </button>
-          <button type="button" onClick={() => void loadContext()} disabled={loading}>
-            Load Event Context
-          </button>
-        </div>
-        <pre>{contextJson}</pre>
-      </section>
-
-      <section className="card">
-        <h2>Plan + Render + Regenerate</h2>
-        <div className="grid">
-          <label>
-            Prompt
-            <input value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-          </label>
-          <label>
-            Output type
-            <select value={outputType} onChange={(e) => setOutputType(e.target.value as OutputType)}>
-              <option value="highlight_reel">highlight_reel</option>
-              <option value="chronological_film">chronological_film</option>
-              <option value="person_focus_reel">person_focus_reel</option>
-            </select>
-          </label>
-          <label>
-            Target duration seconds
-            <input
-              type="number"
-              min={10}
-              max={3600}
-              value={durationSeconds}
-              onChange={(e) => setDurationSeconds(Number(e.target.value))}
-            />
-          </label>
-          <label>
-            Include asset IDs (comma-separated)
-            <input value={includeAssetIds} onChange={(e) => setIncludeAssetIds(e.target.value)} />
-          </label>
-          <label>
-            Exclude asset IDs (comma-separated)
-            <input value={excludeAssetIds} onChange={(e) => setExcludeAssetIds(e.target.value)} />
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={wantSubtitles}
-              onChange={(e) => setWantSubtitles(e.target.checked)}
-            />
-            Burn ASR subtitles
-          </label>
-          <label className="checkbox">
-            <input
-              type="checkbox"
-              checked={wantOverlays}
-              onChange={(e) => setWantOverlays(e.target.checked)}
-            />
-            Draw OCR overlays
-          </label>
-          <button onClick={() => void requestPlan()} disabled={loading}>
-            Create Plan
-          </button>
-          <button onClick={() => void requestRender()} disabled={loading}>
-            Render
-          </button>
-          <button onClick={() => void requestRegenerate()} disabled={loading}>
-            Regenerate
-          </button>
-        </div>
-        <div className="two-col">
-          <pre>{planJson}</pre>
-          <pre>{renderJson}</pre>
-        </div>
-        {renderVideoSrc ? (
-          <div className="video-wrap">
-            <h3>Rendered video</h3>
-            <video controls src={renderVideoSrc} />
+      <section className="layout">
+        <aside className="card">
+          <h2>Events</h2>
+          <form className="stack" onSubmit={(e) => void handleCreateEvent(e)}>
+            <h3>Create Event</h3>
+            <input value={eventTitle} onChange={(e) => setEventTitle(e.target.value)} placeholder="Event title" />
+            <input value={eventType} onChange={(e) => setEventType(e.target.value)} placeholder="Event type" />
+            <input value={eventVenue} onChange={(e) => setEventVenue(e.target.value)} placeholder="Venue (optional)" />
+            <input value={eventDate} onChange={(e) => setEventDate(e.target.value)} placeholder="Date (optional)" />
+            <button type="submit" disabled={loading}>
+              Create Event
+            </button>
+          </form>
+          <div className="events-list">
+            {events.map((event) => (
+              <button
+                key={event.id}
+                className={event.id === selectedEventId ? "event-item active" : "event-item"}
+                onClick={() => setSelectedEventId(event.id)}
+                disabled={loading}
+              >
+                <strong>{event.title}</strong>
+                <span>{event.event_type}</span>
+              </button>
+            ))}
+            {events.length === 0 ? <p className="muted">No events for this profile yet.</p> : null}
           </div>
-        ) : null}
-      </section>
+        </aside>
 
-      <section className="card">
-        <h2>Face APIs</h2>
-        <div className="grid">
-          <label>
-            Person name
-            <input value={personName} onChange={(e) => setPersonName(e.target.value)} />
-          </label>
-          <button onClick={() => void createPerson()} disabled={loading}>
-            Create Person
-          </button>
-          <button onClick={() => void loadPersons()} disabled={loading}>
-            Load Persons
-          </button>
-          <label>
-            Selected person ID
-            <input value={selectedPersonId} onChange={(e) => setSelectedPersonId(e.target.value)} />
-          </label>
-          <label>
-            Person reference image path
-            <input value={personRefPath} onChange={(e) => setPersonRefPath(e.target.value)} />
-          </label>
-          <button onClick={() => void addReference()} disabled={loading}>
-            Add Reference
-          </button>
-          <button onClick={() => void reindexFaces()} disabled={loading}>
-            Reindex Faces
-          </button>
-          <button onClick={() => void loadFaceMatches()} disabled={loading}>
-            Load Face Matches
-          </button>
-        </div>
-        <pre>{JSON.stringify(persons, null, 2)}</pre>
-        <pre>{faceMatchesJson}</pre>
+        <main className="main-pane">
+          <section className="card">
+            <h2>Event Summary</h2>
+            {selectedEvent ? (
+              <div>
+                <p>
+                  <strong>{selectedEvent.title}</strong> ({selectedEvent.event_type}) - <code>{selectedEvent.id}</code>
+                </p>
+                {summary ? (
+                  <div className="stats-grid">
+                    <div className="stat-card">
+                      <h3>Media</h3>
+                      <p>{summary.stats.assets_total} assets</p>
+                      <p className="muted">
+                        {summary.stats.images_total} images / {summary.stats.videos_total} videos
+                      </p>
+                    </div>
+                    <div className="stat-card">
+                      <h3>Faces</h3>
+                      <p>{summary.stats.faces_saved ? "Saved" : "Not saved"}</p>
+                      <p className="muted">
+                        {summary.stats.face_references_total} references / {summary.stats.face_match_insights_total} matches
+                      </p>
+                    </div>
+                    <div className="stat-card">
+                      <h3>Renders</h3>
+                      <p>{summary.stats.renders_total} jobs</p>
+                      <p className="muted">
+                        {summary.stats.renders_completed} done, {summary.stats.renders_running} running,{" "}
+                        {summary.stats.renders_failed} failed
+                      </p>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="muted">Loading event summary...</p>
+                )}
+              </div>
+            ) : (
+              <p className="muted">Select an event to view profile-specific dashboard stats.</p>
+            )}
+          </section>
+
+          <section className="card">
+            <h2>Render Jobs</h2>
+            {renders.length === 0 ? <p className="muted">No renders found for selected event.</p> : null}
+            <div className="render-list">
+              {renders.map((job) => (
+                <article key={job.id} className="render-item">
+                  <div>
+                    <strong>{job.id}</strong>
+                    <p className="muted">
+                      {job.status} - {new Date(job.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  {job.status === "completed" ? (
+                    <a href={api.getRenderVideoUrl(job.id, tenantId)} target="_blank" rel="noreferrer">
+                      Open Video
+                    </a>
+                  ) : null}
+                </article>
+              ))}
+            </div>
+          </section>
+        </main>
       </section>
 
       <footer>

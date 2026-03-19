@@ -6,10 +6,10 @@ import App from "../App";
 describe("App", () => {
   it("renders core sections", () => {
     render(<App />);
-    expect(screen.getByText("VideoWala MVP Frontend")).toBeInTheDocument();
-    expect(screen.getByText("Event")).toBeInTheDocument();
-    expect(screen.getByText("Ingest + Context")).toBeInTheDocument();
-    expect(screen.getByText("Plan + Render + Regenerate")).toBeInTheDocument();
-    expect(screen.getByText("Face APIs")).toBeInTheDocument();
+    expect(screen.getByText("VideoWala PoC Dashboard")).toBeInTheDocument();
+    expect(screen.getByText("Profiles")).toBeInTheDocument();
+    expect(screen.getByText("Events")).toBeInTheDocument();
+    expect(screen.getByText("Event Summary")).toBeInTheDocument();
+    expect(screen.getByText("Render Jobs")).toBeInTheDocument();
   });
 });

@@ -199,6 +199,33 @@ class FeedbackUpdate(BaseModel):
     render_overlays: bool = Field(default=False, description="Draw OCR overlays on top of the video.")
 
 
+class EventSummaryStats(BaseModel):
+    assets_total: int
+    images_total: int
+    videos_total: int
+    has_media: bool
+    persons_total: int
+    face_references_total: int
+    faces_saved: bool
+    face_match_insights_total: int
+    has_face_matches: bool
+    renders_total: int
+    renders_queued: int
+    renders_running: int
+    renders_completed: int
+    renders_failed: int
+
+
+class EventSummary(BaseModel):
+    event: Event
+    stats: EventSummaryStats
+
+
+class RenderJobList(BaseModel):
+    event_id: str
+    renders: list[RenderJob]
+
+
 class PersonCreate(BaseModel):
     tenant_id: str
     event_id: str
