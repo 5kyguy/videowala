@@ -22,6 +22,7 @@ class InsightType(str, Enum):
     ocr_text = "ocr_text"
     asr_transcript = "asr_transcript"
     semantic_embedding = "semantic_embedding"
+    cull_metrics = "cull_metrics"
 
 
 class EventCreate(BaseModel):
@@ -86,6 +87,28 @@ class Asset(BaseModel):
     created_at: datetime
 
 
+class AssetProxy(BaseModel):
+    asset_id: str
+    proxy_path: str
+    metadata: dict = Field(default_factory=dict)
+    manifest: dict = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AssetSegment(BaseModel):
+    id: str
+    tenant_id: str
+    event_id: str
+    asset_id: str
+    start_s: float
+    end_s: float
+    score: float = 0.0
+    keep: bool = True
+    is_duplicate: bool = False
+    reject_reasons: list[str] = Field(default_factory=list)
+    created_at: datetime
+
+
 class AssetInsight(BaseModel):
     id: str
     tenant_id: str
@@ -146,6 +169,20 @@ class RenderJob(BaseModel):
     plan_id: str
     status: Literal["queued", "running", "completed", "failed"]
     output_path: str | None = None
+    progress_percent: int = 0
+    error_message: str | None = None
+    created_at: datetime
+
+
+class IndexJob(BaseModel):
+    id: str
+    tenant_id: str
+    event_id: str
+    asset_id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    progress_percent: int = 0
+    insights_generated: int = 0
+    error_message: str | None = None
     created_at: datetime
 
 

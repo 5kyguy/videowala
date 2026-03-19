@@ -9,7 +9,15 @@ from fastapi.responses import FileResponse
 
 from ..config import settings
 from ..db import now_utc
-from ..repositories import AssetRepository, EventRepository, PersonReferenceRepository, PersonRepository, RenderRepository, next_id
+from ..repositories import (
+    AssetRepository,
+    EventRepository,
+    IndexJobRepository,
+    PersonReferenceRepository,
+    PersonRepository,
+    RenderRepository,
+    next_id,
+)
 from ..schemas import (
     AssetIngestBody,
     AssetRegister,
@@ -23,13 +31,13 @@ from ..schemas import (
     PersonReferenceCreate,
 )
 from ..services.faces import face_service
-from ..services.ingest import create_asset_record, discover_media_files, register_asset, resolve_ingest_path
+from ..services.ingest import create_asset_record, discover_media_files, purge_event_proxies, register_asset, resolve_ingest_path
 from ..services.indexing import get_event_context, get_event_context_filtered
 from ..services.search import semantic_search
 from ..services.planner import build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
-from ..services.rendering import UnsafeRenderCommandError, create_render_job, execute_render_job
-from ..workers.index_worker import run_index_job
+from ..services.rendering import UnsafeRenderCommandError, create_render_job
+from ..workers.index_worker import run_index_job, submit_index_job, submit_render_job
 
 logger = logging.getLogger(__name__)
 
@@ -111,13 +119,14 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
         for abs_path, mtype in file_iter:
             asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
             try:
-                n = run_index_job(asset.id)
+                job = submit_index_job(asset.id)
                 assets_out.append(
                     {
                         "asset_id": asset.id,
                         "media_path": str(abs_path),
                         "media_type": mtype,
-                        "insights_generated": n,
+                        "insights_generated": 0,
+                        "index_job_id": job.id,
                         "error": None,
                     }
                 )
@@ -150,8 +159,20 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
             media_type=payload.media_type,
         )
     )
-    insight_count = run_index_job(asset.id)
-    return {"asset_id": asset.id, "insights_generated": insight_count}
+    job = submit_index_job(asset.id)
+    return {"asset_id": asset.id, "insights_generated": 0, "index_job_id": job.id, "index_status": job.status}
+
+
+@router.get("/index-jobs/{index_job_id}")
+def get_index_job(index_job_id: str, tenant_id: str) -> dict:
+    job = IndexJobRepository.get(index_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Index job not found.")
+    try:
+        assert_tenant_scope(tenant_id, job.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"index_job": job.model_dump()}
 
 
 @router.get("/events/{event_id}/context")
@@ -210,12 +231,10 @@ def create_render(payload: ContentRequestCreate) -> dict:
     plan = build_plan(payload, context)
     try:
         job = create_render_job(tenant_id=payload.tenant_id, event_id=payload.event_id, plan=plan)
-        executed = execute_render_job(job.id)
+        submit_render_job(job.id)
     except UnsafeRenderCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if executed.status != "completed":
-        raise HTTPException(status_code=500, detail="Rendering failed. Check server logs/audit.")
-    return {"render_job": executed.model_dump(), "plan": plan.model_dump()}
+    return {"render_job": job.model_dump(), "plan": plan.model_dump(), "queued": True}
 
 
 @router.get("/renders/{render_job_id}/video")
@@ -236,6 +255,18 @@ def get_render_video(render_job_id: str, tenant_id: str) -> FileResponse:
     _assert_path_within_root(path, Path(settings.storage_root))
 
     return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
+@router.get("/renders/{render_job_id}")
+def get_render_job(render_job_id: str, tenant_id: str) -> dict:
+    job = RenderRepository.get(render_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found.")
+    try:
+        assert_tenant_scope(tenant_id, job.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    return {"render_job": job.model_dump()}
 
 
 @router.post("/requests/feedback/regenerate")
@@ -271,16 +302,14 @@ def regenerate_with_feedback(payload: FeedbackUpdate) -> dict:
     plan = build_plan(request, context)
     try:
         job = create_render_job(tenant_id=payload.tenant_id, event_id=payload.event_id, plan=plan)
-        executed = execute_render_job(job.id)
+        submit_render_job(job.id)
     except UnsafeRenderCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if executed.status != "completed":
-        raise HTTPException(status_code=500, detail="Rendering failed. Check server logs/audit.")
     return {
-        "status": "regenerated",
+        "status": "queued",
         "feedback": payload.model_dump(),
         "plan": plan.model_dump(),
-        "render_job": executed.model_dump(),
+        "render_job": job.model_dump(),
     }
 
 
@@ -296,6 +325,19 @@ def cleanup_event_scratch(event_id: str, tenant_id: str) -> dict:
     cleanup_tenant_scratch(tenant_id=tenant_id, event_id=event_id)
     audit_action(tenant_id, event_id, "scratch_cleanup", {})
     return {"status": "cleaned"}
+
+
+@router.post("/events/{event_id}/proxies/purge")
+def purge_proxies(event_id: str, tenant_id: str) -> dict:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    result = purge_event_proxies(tenant_id=tenant_id, event_id=event_id)
+    return {"status": "purged", **result}
 
 
 @router.post("/persons", response_model=Person)

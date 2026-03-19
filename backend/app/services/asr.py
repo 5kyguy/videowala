@@ -16,10 +16,35 @@ def _stub_segments(media_path: str) -> list[dict]:
     return [{"start": 0.0, "end": 3.2, "text": f"stub_asr_{digest}", "confidence": 0.55}]
 
 
+def _torch_gpu_available() -> bool:
+    try:
+        import torch
+        return bool(torch.cuda.is_available())
+    except Exception:
+        return False
+
+
 class AsrService:
+    def __init__(self) -> None:
+        self._model = None
+        self._device: str | None = None
+
     @property
     def model_name(self) -> str:
         return "faster-whisper (large-v3-turbo)"
+
+    def _ensure_model(self) -> None:
+        if self._model is not None:
+            return
+        try:
+            from faster_whisper import WhisperModel
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("faster-whisper is required when stage2_stub_models=False") from exc
+        use_gpu = _torch_gpu_available()
+        self._device = "cuda" if use_gpu else "cpu"
+        compute_type = "float16" if use_gpu else "int8"
+        self._model = WhisperModel("large-v3-turbo", device=self._device, compute_type=compute_type)
+        logger.info("Whisper model loaded (device=%s, compute_type=%s).", self._device, compute_type)
 
     def _extract_audio(self, video_path: Path, out_path: Path) -> bool:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,24 +79,28 @@ class AsrService:
         if settings.stage2_stub_models:
             return _stub_segments(media_path)
         target = Path(media_path)
-        # ASR is intentionally video-only.
         if not target.exists() or target.suffix.lower() not in VIDEO_EXTS:
             return []
-        try:
-            from faster_whisper import WhisperModel
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("faster-whisper is required when stage2_stub_models=False") from exc
+
+        self._ensure_model()
+        assert self._model is not None
 
         scratch = Path(settings.scratch_root) / "asr"
         wav = scratch / f"{target.stem}.wav"
         if not self._extract_audio(target, wav):
             return []
-        model = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
-        segments, _info = model.transcribe(str(wav))
-        out = []
-        for seg in segments:
-            out.append({"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip(), "confidence": 0.6})
-        return out
+        try:
+            segments, _info = self._model.transcribe(str(wav))
+            out = []
+            for seg in segments:
+                out.append({"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip(), "confidence": 0.6})
+            return out
+        finally:
+            try:
+                if wav.exists():
+                    wav.unlink()
+            except OSError:
+                pass
 
 
 asr_service = AsrService()

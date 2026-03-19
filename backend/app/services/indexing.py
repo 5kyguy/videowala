@@ -1,19 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+
 from ..db import now_utc
 from ..repositories import (
     AssetRepository,
     InsightRepository,
     PersonReferenceRepository,
     PersonRepository,
+    SegmentRepository,
     next_id,
 )
 from ..config import settings
-from ..schemas import Asset, AssetInsight, InsightType
+from ..schemas import Asset, AssetInsight, AssetSegment, InsightType
 from ..vector_store import upsert_asset_vector
 from .asr import asr_service
 from .embeddings import embedding_service
 from .faces import face_service
+from .ingest import ensure_asset_proxy
 from .ocr import ocr_service
 from .privacy import audit_action
 from .vlm import vlm_service
@@ -33,6 +37,51 @@ def _stub_face_matches(asset: Asset) -> list[dict]:
     return face_service.match_faces(detections, references)
 
 
+def _segment_for_asset(asset: Asset, duration_s: float) -> list[tuple[float, float]]:
+    if asset.media_type == "image":
+        return [(0.0, 3.0)]
+    if duration_s <= 0:
+        return [(0.0, 4.0)]
+    chunk = 6.0
+    starts: list[float] = []
+    cur = 0.0
+    while cur < duration_s:
+        starts.append(cur)
+        cur += chunk
+    out: list[tuple[float, float]] = []
+    for start in starts:
+        end = min(duration_s, start + chunk)
+        if end - start >= 1.0:
+            out.append((round(start, 3), round(end, 3)))
+    if not out:
+        out = [(0.0, min(6.0, round(duration_s, 3)))]
+    return out[:40]
+
+
+def _base_cull_score(asset: Asset, manifest: dict, detections: list[dict], asr_segments: list[dict], ocr_items: list[dict]) -> float:
+    score = 0.45
+    width = int(manifest.get("width", 0) or 0)
+    height = int(manifest.get("height", 0) or 0)
+    if width >= 960 or height >= 720:
+        score += 0.1
+    if bool(manifest.get("has_audio")):
+        score += 0.05
+    if detections:
+        score += 0.1
+    if asr_segments:
+        score += 0.1
+    if ocr_items:
+        score += 0.05
+    if asset.media_type == "image":
+        score -= 0.03
+    return max(0.0, min(1.0, round(score, 4)))
+
+
+def _segment_signature(asset: Asset, start_s: float, end_s: float) -> str:
+    seed = f"{asset.media_path}|{asset.media_type}|{start_s:.2f}|{end_s:.2f}"
+    return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
+
+
 def index_asset(asset_id: str) -> list[AssetInsight]:
     asset = AssetRepository.get(asset_id)
     if asset is None:
@@ -46,24 +95,48 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             InsightType.vlm_tags.value,
             InsightType.face_detections.value,
             InsightType.face_matches.value,
+            InsightType.cull_metrics.value,
         ],
     )
 
-    detections = face_service.detect_faces(asset.media_path)
+    proxy = ensure_asset_proxy(asset)
+    analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
+
+    detections = face_service.detect_faces(analysis_media_path)
     matches = _stub_face_matches(asset)
 
-    ocr_items, ocr_model = ocr_service.extract(asset.media_path)
+    ocr_items, ocr_model = ocr_service.extract(analysis_media_path)
 
-    asr_segments = asr_service.transcribe(asset.media_path) if asset.media_type == "video" else []
+    asr_segments = asr_service.transcribe(analysis_media_path) if asset.media_type == "video" else []
 
     ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
     asr_text_joined = " ".join([seg.get("text", "") for seg in asr_segments]).strip()
 
     vlm = vlm_service.caption_and_tags(
-        media_path=asset.media_path,
+        media_path=analysis_media_path,
         media_type=asset.media_type,
         scratch_root=settings.scratch_root,
     )
+
+    duration_s = float(proxy.manifest.get("duration_s", 0.0) or 0.0)
+    base_score = _base_cull_score(asset, proxy.manifest, detections, asr_segments, ocr_items)
+    segments = [
+        AssetSegment(
+            id=next_id("seg"),
+            tenant_id=asset.tenant_id,
+            event_id=asset.event_id,
+            asset_id=asset.id,
+            start_s=start_s,
+            end_s=end_s,
+            score=base_score,
+            keep=True,
+            is_duplicate=False,
+            reject_reasons=[],
+            created_at=now_utc(),
+        )
+        for (start_s, end_s) in _segment_for_asset(asset, duration_s)
+    ]
+    SegmentRepository.replace_for_asset(asset.id, asset.event_id, segments)
 
     insights = [
         AssetInsight(
@@ -107,6 +180,27 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             created_at=now_utc(),
         ),
     ]
+
+    insights.append(
+        AssetInsight(
+            id=next_id("insight"),
+            tenant_id=asset.tenant_id,
+            event_id=asset.event_id,
+            asset_id=asset.id,
+            insight_type=InsightType.cull_metrics,
+            payload={
+                "base_score": base_score,
+                "proxy_path": proxy.proxy_path,
+                "segment_count": len(segments),
+                "segment_signatures": [
+                    _segment_signature(asset, seg.start_s, seg.end_s)
+                    for seg in segments
+                ],
+            },
+            confidence=0.55,
+            created_at=now_utc(),
+        )
+    )
 
     insights.append(
         AssetInsight(

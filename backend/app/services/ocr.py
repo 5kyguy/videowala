@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -198,16 +199,20 @@ class OcrService:
         if not frame_samples:
             return [], "none"
 
+        frame_dir = frame_samples[0][0].parent if frame_samples else None
         merged: list[dict] = []
         model_label = "none"
-        for frame, ts in frame_samples:
-            items, label = self._extract_image(frame)
-            model_label = label
-            for item in items:
-                enriched = dict(item)
-                # Preserve timestamp so downstream can decide whether to surface timing.
-                enriched["time_s"] = round(ts, 3)
-                merged.append(enriched)
+        try:
+            for frame, ts in frame_samples:
+                items, label = self._extract_image(frame)
+                model_label = label
+                for item in items:
+                    enriched = dict(item)
+                    enriched["time_s"] = round(ts, 3)
+                    merged.append(enriched)
+        finally:
+            if frame_dir is not None and frame_dir.exists():
+                shutil.rmtree(frame_dir, ignore_errors=True)
         return merged, model_label
 
     def extract(self, media_path: str) -> tuple[list[dict], str]:

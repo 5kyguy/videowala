@@ -46,6 +46,49 @@ def _safe_extract_frame(video_path: Path, out_path: Path, *, timestamp_s: float 
         return False
 
 
+def _video_duration_seconds(video_path: Path) -> float:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video_path),
+    ]
+    try:
+        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT, text=True).strip()
+        return max(0.0, float(out))
+    except Exception:
+        return 0.0
+
+
+def _extract_representative_frames(video_path: Path, scratch_dir: Path) -> list[Path]:
+    """Extract 3-5 evenly-spaced frames for better video understanding."""
+    duration = _video_duration_seconds(video_path)
+    if duration <= 0:
+        timestamps = [1.0]
+    elif duration <= 10:
+        timestamps = [min(1.0, duration * 0.5)]
+    else:
+        timestamps = sorted(set([
+            round(min(1.0, duration * 0.05), 3),
+            round(duration * 0.25, 3),
+            round(duration * 0.5, 3),
+            round(duration * 0.75, 3),
+            round(max(0.0, duration - 1.0), 3),
+        ]))
+
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    extracted: list[Path] = []
+    for idx, ts in enumerate(timestamps):
+        frame_path = scratch_dir / f"{video_path.stem}_frame_{idx:02d}.jpg"
+        if _safe_extract_frame(video_path, frame_path, timestamp_s=ts):
+            extracted.append(frame_path)
+    return extracted
+
+
 def _parse_json_block(text: str) -> dict | None:
     # Try to find a JSON object in a model response.
     m = re.search(r"\{[\s\S]*\}", text)
@@ -126,17 +169,22 @@ class VlmService:
         self._ensure_loaded()
         assert self._model is not None and self._processor is not None
 
-        image_path: Path | None = None
+        image_paths: list[Path] = []
+        _vlm_scratch_files: list[Path] = []
         if media_type == "image":
-            image_path = p
+            image_paths = [p]
         elif media_type == "video":
-            # Minimal video support: extract a representative frame and treat as an image.
-            extracted = Path(scratch_root) / "vlm" / f"{p.stem}_frame.jpg"
-            ok = _safe_extract_frame(p, extracted, timestamp_s=1.0)
-            image_path = extracted if ok else None
+            vlm_scratch_dir = Path(scratch_root) / "vlm"
+            frames = _extract_representative_frames(p, vlm_scratch_dir)
+            _vlm_scratch_files.extend(frames)
+            image_paths = frames
 
-        if image_path is None or not image_path.exists():
-            # Fall back to filename-based stub if we cannot load media.
+        if not image_paths:
+            for f in _vlm_scratch_files:
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
             return VlmResult(model=self._model_id, caption=_stub_caption(base), tags=_stub_tags(base, media_type))
 
         from PIL import Image
@@ -150,44 +198,59 @@ class VlmService:
             "No markdown.\n"
         )
 
-        img = Image.open(image_path).convert("RGB")
-        try:
-            inputs = self._processor(images=img, text=prompt, return_tensors="pt")
-        except ValueError as exc:
-            # SmolVLM processors require image placeholders in text (e.g. "<image>").
-            if "number of images in the text" not in str(exc).lower():
-                raise
-            inputs = self._processor(images=img, text=f"<image>\n{prompt}", return_tensors="pt")
-        inputs = {k: v.to(device) for k, v in inputs.items()}
-        with torch.no_grad():
-            generated = self._model.generate(**inputs, max_new_tokens=160, do_sample=False)
-        decoded = self._processor.batch_decode(generated, skip_special_tokens=True)[0]
-        # Many instruction-tuned VLMs (including SmolVLM2) respond with natural
-        # language like "Assistant: <caption>" instead of strict JSON, despite
-        # the JSON prompt. Strip the prompt prefix and any "Assistant:" marker
-        # before attempting JSON parsing so we never persist the raw instructions.
-        cleaned = decoded.strip()
-        # Drop our own prompt if it was echoed back.
-        if cleaned.startswith(prompt.strip()):
-            cleaned = cleaned[len(prompt.strip()) :].lstrip()
-        # Handle common chat-style prefixes.
-        for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
-            if marker in cleaned:
-                cleaned = cleaned.split(marker, 1)[1].strip()
-                break
+        best_caption = ""
+        all_tags: list[str] = []
+        for image_path in image_paths:
+            if not image_path.exists():
+                continue
+            try:
+                img = Image.open(image_path).convert("RGB")
+            except Exception:
+                continue
+            try:
+                inputs = self._processor(images=img, text=prompt, return_tensors="pt")
+            except ValueError as exc:
+                if "number of images in the text" not in str(exc).lower():
+                    raise
+                inputs = self._processor(images=img, text=f"<image>\n{prompt}", return_tensors="pt")
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            with torch.no_grad():
+                generated = self._model.generate(**inputs, max_new_tokens=160, do_sample=False)
+            decoded = self._processor.batch_decode(generated, skip_special_tokens=True)[0]
 
-        payload = _parse_json_block(cleaned) or {}
-        caption = str(payload.get("caption") or "").strip()
-        tags_raw = payload.get("tags") or []
+            cleaned = decoded.strip()
+            if cleaned.startswith(prompt.strip()):
+                cleaned = cleaned[len(prompt.strip()) :].lstrip()
+            for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
+                if marker in cleaned:
+                    cleaned = cleaned.split(marker, 1)[1].strip()
+                    break
+
+            payload = _parse_json_block(cleaned) or {}
+            frame_caption = str(payload.get("caption") or "").strip()
+            tags_raw = payload.get("tags") or []
+            if isinstance(tags_raw, list):
+                all_tags.extend([str(t).strip() for t in tags_raw if str(t).strip()])
+            if frame_caption and len(frame_caption) > len(best_caption):
+                best_caption = frame_caption
+            elif not best_caption and cleaned:
+                best_caption = cleaned[:300]
+
+        caption = best_caption or _stub_caption(base)
+        seen: set[str] = set()
         tags: list[str] = []
-        if isinstance(tags_raw, list):
-            tags = [str(t).strip() for t in tags_raw if str(t).strip()]
-        if not caption:
-            # Fall back to the cleaned assistant text (without the prompt),
-            # and only if that is non-empty; otherwise use filename stub.
-            caption = cleaned[:300] if cleaned else _stub_caption(base)
+        for t in all_tags:
+            low = t.lower()
+            if low not in seen:
+                seen.add(low)
+                tags.append(t)
         if not tags:
             tags = _stub_tags(base, media_type)
+        for f in _vlm_scratch_files:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
         return VlmResult(model=self._model_id, caption=caption, tags=tags[:16])
 
 

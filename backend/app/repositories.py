@@ -5,8 +5,11 @@ from uuid import uuid4
 from .db import db_cursor, decode_json, encode_json, from_iso, now_utc, to_iso
 from .schemas import (
     Asset,
+    AssetProxy,
+    AssetSegment,
     AssetInsight,
     Event,
+    IndexJob,
     Person,
     PersonReference,
     PlannerAction,
@@ -132,6 +135,45 @@ class AssetRepository:
         ]
 
 
+class AssetProxyRepository:
+    @staticmethod
+    def upsert(proxy: AssetProxy) -> AssetProxy:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO asset_proxies (asset_id, proxy_path, metadata_json, manifest_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(asset_id) DO UPDATE SET
+                    proxy_path = excluded.proxy_path,
+                    metadata_json = excluded.metadata_json,
+                    manifest_json = excluded.manifest_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    proxy.asset_id,
+                    proxy.proxy_path,
+                    encode_json(proxy.metadata),
+                    encode_json(proxy.manifest),
+                    to_iso(proxy.created_at),
+                ),
+            )
+        return proxy
+
+    @staticmethod
+    def get(asset_id: str) -> AssetProxy | None:
+        with db_cursor() as cur:
+            row = cur.execute("SELECT * FROM asset_proxies WHERE asset_id = ?", (asset_id,)).fetchone()
+        if row is None:
+            return None
+        return AssetProxy(
+            asset_id=row["asset_id"],
+            proxy_path=row["proxy_path"],
+            metadata=decode_json(row["metadata_json"]),
+            manifest=decode_json(row["manifest_json"]),
+            created_at=from_iso(row["created_at"]),
+        )
+
+
 class InsightRepository:
     @staticmethod
     def create_many(insights: list[AssetInsight]) -> None:
@@ -203,6 +245,117 @@ class InsightRepository:
             )
 
 
+class SegmentRepository:
+    @staticmethod
+    def replace_for_asset(asset_id: str, event_id: str, segments: list[AssetSegment]) -> None:
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM asset_segments WHERE event_id = ? AND asset_id = ?", (event_id, asset_id))
+            for segment in segments:
+                cur.execute(
+                    """
+                    INSERT INTO asset_segments
+                    (id, tenant_id, event_id, asset_id, start_s, end_s, score, keep, is_duplicate, reject_reasons_json, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        segment.id,
+                        segment.tenant_id,
+                        segment.event_id,
+                        segment.asset_id,
+                        segment.start_s,
+                        segment.end_s,
+                        segment.score,
+                        1 if segment.keep else 0,
+                        1 if segment.is_duplicate else 0,
+                        encode_json(segment.reject_reasons),
+                        to_iso(segment.created_at),
+                    ),
+                )
+
+    @staticmethod
+    def list_for_event(event_id: str, *, keep_only: bool = False) -> list[AssetSegment]:
+        sql = "SELECT * FROM asset_segments WHERE event_id = ?"
+        params: tuple[object, ...] = (event_id,)
+        if keep_only:
+            sql += " AND keep = 1"
+        sql += " ORDER BY score DESC, created_at ASC"
+        with db_cursor() as cur:
+            rows = cur.execute(sql, params).fetchall()
+        return [
+            AssetSegment(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                event_id=row["event_id"],
+                asset_id=row["asset_id"],
+                start_s=float(row["start_s"]),
+                end_s=float(row["end_s"]),
+                score=float(row["score"]),
+                keep=bool(row["keep"]),
+                is_duplicate=bool(row["is_duplicate"]),
+                reject_reasons=decode_json(row["reject_reasons_json"]),
+                created_at=from_iso(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def get(segment_id: str) -> AssetSegment | None:
+        with db_cursor() as cur:
+            row = cur.execute("SELECT * FROM asset_segments WHERE id = ?", (segment_id,)).fetchone()
+        if row is None:
+            return None
+        return AssetSegment(
+            id=row["id"],
+            tenant_id=row["tenant_id"],
+            event_id=row["event_id"],
+            asset_id=row["asset_id"],
+            start_s=float(row["start_s"]),
+            end_s=float(row["end_s"]),
+            score=float(row["score"]),
+            keep=bool(row["keep"]),
+            is_duplicate=bool(row["is_duplicate"]),
+            reject_reasons=decode_json(row["reject_reasons_json"]),
+            created_at=from_iso(row["created_at"]),
+        )
+
+    @staticmethod
+    def update_culling(
+        segment_id: str,
+        *,
+        score: float,
+        keep: bool,
+        is_duplicate: bool,
+        reject_reasons: list[str],
+    ) -> None:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE asset_segments
+                SET score = ?, keep = ?, is_duplicate = ?, reject_reasons_json = ?
+                WHERE id = ?
+                """,
+                (score, 1 if keep else 0, 1 if is_duplicate else 0, encode_json(reject_reasons), segment_id),
+            )
+
+    @staticmethod
+    def batch_update_culling(
+        updates: list[tuple[str, float, bool, bool, list[str]]],
+    ) -> None:
+        """Batch version of update_culling. Each tuple: (segment_id, score, keep, is_duplicate, reject_reasons)."""
+        if not updates:
+            return
+        with db_cursor() as cur:
+            for segment_id, score, keep, is_duplicate, reject_reasons in updates:
+                cur.execute(
+                    """
+                    UPDATE asset_segments
+                    SET score = ?, keep = ?, is_duplicate = ?, reject_reasons_json = ?
+                    WHERE id = ?
+                    """,
+                    (score, 1 if keep else 0, 1 if is_duplicate else 0, encode_json(reject_reasons), segment_id),
+                )
+
+
 class PlanRepository:
     @staticmethod
     def create(plan: PlannerPlan) -> str:
@@ -251,12 +404,13 @@ class RenderRepository:
         scratch_dir: str,
         subtitles_enabled: bool = False,
         overlays_enabled: bool = False,
+        clip_inputs: list[dict] | None = None,
     ) -> RenderJob:
         with db_cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO render_jobs (id, tenant_id, event_id, plan_id, status, output_path, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO render_jobs (id, tenant_id, event_id, plan_id, status, output_path, progress_percent, error_message, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -265,15 +419,25 @@ class RenderRepository:
                     job.plan_id,
                     job.status,
                     job.output_path,
+                    job.progress_percent,
+                    job.error_message,
                     to_iso(job.created_at),
                 ),
             )
             cur.execute(
                 """
-                INSERT INTO render_specs (render_job_id, input_files_json, duration_seconds, scratch_dir, subtitles_enabled, overlays_enabled)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO render_specs (render_job_id, input_files_json, duration_seconds, scratch_dir, subtitles_enabled, overlays_enabled, clip_inputs_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (job.id, encode_json(input_files), duration_seconds, scratch_dir, 1 if subtitles_enabled else 0, 1 if overlays_enabled else 0),
+                (
+                    job.id,
+                    encode_json(input_files),
+                    duration_seconds,
+                    scratch_dir,
+                    1 if subtitles_enabled else 0,
+                    1 if overlays_enabled else 0,
+                    encode_json(clip_inputs or []),
+                ),
             )
         return job
 
@@ -290,6 +454,8 @@ class RenderRepository:
             plan_id=row["plan_id"],
             status=row["status"],
             output_path=row["output_path"],
+            progress_percent=int(row["progress_percent"]) if "progress_percent" in row.keys() else 0,
+            error_message=row["error_message"] if "error_message" in row.keys() else None,
             created_at=from_iso(row["created_at"]),
         )
 
@@ -305,14 +471,131 @@ class RenderRepository:
             "scratch_dir": row["scratch_dir"],
             "subtitles_enabled": bool(row["subtitles_enabled"]) if "subtitles_enabled" in row.keys() else False,
             "overlays_enabled": bool(row["overlays_enabled"]) if "overlays_enabled" in row.keys() else False,
+            "clip_inputs": decode_json(row["clip_inputs_json"]) if "clip_inputs_json" in row.keys() and row["clip_inputs_json"] else [],
         }
 
     @staticmethod
-    def update_status(job_id: str, status: str, output_path: str | None = None) -> None:
+    def update_status(
+        job_id: str,
+        status: str,
+        output_path: str | None = None,
+        *,
+        progress_percent: int | None = None,
+        error_message: str | None = None,
+    ) -> None:
         with db_cursor() as cur:
             cur.execute(
-                "UPDATE render_jobs SET status = ?, output_path = COALESCE(?, output_path) WHERE id = ?",
-                (status, output_path, job_id),
+                """
+                UPDATE render_jobs
+                SET status = ?,
+                    output_path = COALESCE(?, output_path),
+                    progress_percent = COALESCE(?, progress_percent),
+                    error_message = COALESCE(?, error_message)
+                WHERE id = ?
+                """,
+                (status, output_path, progress_percent, error_message, job_id),
+            )
+
+
+class IndexJobRepository:
+    @staticmethod
+    def create(job: IndexJob) -> IndexJob:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO index_jobs
+                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                """,
+                (
+                    job.id,
+                    job.tenant_id,
+                    job.event_id,
+                    job.asset_id,
+                    job.status,
+                    job.progress_percent,
+                    job.insights_generated,
+                    job.error_message,
+                    to_iso(job.created_at),
+                ),
+            )
+        return job
+
+    @staticmethod
+    def get(job_id: str) -> IndexJob | None:
+        with db_cursor() as cur:
+            row = cur.execute("SELECT * FROM index_jobs WHERE id = ?", (job_id,)).fetchone()
+        if row is None:
+            return None
+        return IndexJob(
+            id=row["id"],
+            tenant_id=row["tenant_id"],
+            event_id=row["event_id"],
+            asset_id=row["asset_id"],
+            status=row["status"],
+            progress_percent=int(row["progress_percent"]),
+            insights_generated=int(row["insights_generated"]),
+            error_message=row["error_message"],
+            created_at=from_iso(row["created_at"]),
+        )
+
+    @staticmethod
+    def list_for_event(event_id: str) -> list[IndexJob]:
+        with db_cursor() as cur:
+            rows = cur.execute(
+                "SELECT * FROM index_jobs WHERE event_id = ? ORDER BY created_at DESC",
+                (event_id,),
+            ).fetchall()
+        return [
+            IndexJob(
+                id=row["id"],
+                tenant_id=row["tenant_id"],
+                event_id=row["event_id"],
+                asset_id=row["asset_id"],
+                status=row["status"],
+                progress_percent=int(row["progress_percent"]),
+                insights_generated=int(row["insights_generated"]),
+                error_message=row["error_message"],
+                created_at=from_iso(row["created_at"]),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def mark_running(job_id: str) -> None:
+        with db_cursor() as cur:
+            cur.execute(
+                "UPDATE index_jobs SET status = 'running', started_at = ?, progress_percent = 5 WHERE id = ?",
+                (to_iso(now_utc()), job_id),
+            )
+
+    @staticmethod
+    def set_progress(job_id: str, progress_percent: int) -> None:
+        with db_cursor() as cur:
+            cur.execute("UPDATE index_jobs SET progress_percent = ? WHERE id = ?", (progress_percent, job_id))
+
+    @staticmethod
+    def mark_completed(job_id: str, insights_generated: int) -> None:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE index_jobs
+                SET status = 'completed', progress_percent = 100, insights_generated = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                (insights_generated, to_iso(now_utc()), job_id),
+            )
+
+    @staticmethod
+    def mark_failed(job_id: str, error_message: str) -> None:
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE index_jobs
+                SET status = 'failed', error_message = ?, finished_at = ?
+                WHERE id = ?
+                """,
+                (error_message, to_iso(now_utc()), job_id),
             )
 
 

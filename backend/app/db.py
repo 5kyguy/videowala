@@ -25,6 +25,8 @@ def get_connection() -> sqlite3.Connection:
     conn = sqlite3.connect(settings.db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA busy_timeout = 5000")
     return conn
 
 
@@ -160,6 +162,68 @@ def migrate() -> None:
                 """
             )
             cur.execute("PRAGMA user_version = 2")
+
+        if version < 3:
+            cur.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS asset_proxies (
+                    asset_id TEXT PRIMARY KEY,
+                    proxy_path TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    manifest_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS asset_segments (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    start_s REAL NOT NULL,
+                    end_s REAL NOT NULL,
+                    score REAL NOT NULL DEFAULT 0.0,
+                    keep INTEGER NOT NULL DEFAULT 1,
+                    is_duplicate INTEGER NOT NULL DEFAULT 0,
+                    reject_reasons_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE,
+                    FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+                );
+
+                CREATE TABLE IF NOT EXISTS index_jobs (
+                    id TEXT PRIMARY KEY,
+                    tenant_id TEXT NOT NULL,
+                    event_id TEXT NOT NULL,
+                    asset_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    progress_percent INTEGER NOT NULL DEFAULT 0,
+                    insights_generated INTEGER NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    created_at TEXT NOT NULL,
+                    started_at TEXT,
+                    finished_at TEXT,
+                    FOREIGN KEY(event_id) REFERENCES events(id) ON DELETE CASCADE,
+                    FOREIGN KEY(asset_id) REFERENCES assets(id) ON DELETE CASCADE
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_asset_segments_event ON asset_segments(event_id);
+                CREATE INDEX IF NOT EXISTS idx_asset_segments_asset ON asset_segments(asset_id);
+                CREATE INDEX IF NOT EXISTS idx_index_jobs_event ON index_jobs(event_id);
+                CREATE INDEX IF NOT EXISTS idx_index_jobs_asset ON index_jobs(asset_id);
+                """
+            )
+            cur.execute("PRAGMA user_version = 3")
+
+        if version < 4:
+            cur.executescript(
+                """
+                ALTER TABLE render_specs ADD COLUMN clip_inputs_json TEXT;
+                ALTER TABLE render_jobs ADD COLUMN progress_percent INTEGER NOT NULL DEFAULT 0;
+                ALTER TABLE render_jobs ADD COLUMN error_message TEXT;
+                """
+            )
+            cur.execute("PRAGMA user_version = 4")
 
 
 def reset_database_for_tests(path: str) -> None:
