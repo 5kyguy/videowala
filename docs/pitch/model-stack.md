@@ -2,17 +2,18 @@
 
 ## Implementation status
 
-The backend currently implements **stable stubbed inference by default** to keep tests deterministic and avoid requiring heavy model downloads:
+The backend supports two runtime modes, but the intended path for this project is **real model mode**:
 
-- `settings.stage2_stub_models = True` (default)
-  - embeddings/face/OCR/ASR return deterministic stub outputs
-  - stage2 flags still control which insights are persisted/rendered
-- You can switch to “real” model execution by setting `stage2_stub_models = False` and installing the corresponding dependencies.
+- **Real mode (GPU preferred)**: set `DEV_MODE=false` (or omit `DEV_MODE`)
+  - attempts real integrations via `transformers` (VLM), `sentence-transformers` (embeddings), OCR, and `faster-whisper`
+  - falls back gracefully when a dependency/model/media cannot be loaded
+- **Dev mode (stubbed)**: set `DEV_MODE=true` in `backend/.env`
+  - VLM/OCR/ASR/embeddings return deterministic stub outputs (fast + test-friendly, suitable for CI)
 
-The code references these model IDs/names today:
+The code references these model IDs/names today (configurable via `backend/.env`):
 
-- **VLM (stub label)**: `HuggingFaceTB/SmolVLM2-2.2B-Instruct` (caption/tag text is currently stubbed)
-- **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` (configurable via `settings.embedding_model_id`)
+- **VLM**: `HuggingFaceTB/SmolVLM2-2.2B-Instruct` (via `VLM_MODEL_ID`)
+- **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` (via `EMBEDDING_MODEL_ID`)
 - **Faces**: `insightface` (real inference is gated by `enable_real_face_recognition`)
 - **OCR**: `PaddleOCR` (images only; video frame sampling not implemented yet)
 - **ASR**: `faster-whisper (large-v3-turbo)` (CPU default in code path)

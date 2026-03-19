@@ -6,6 +6,10 @@ Base URL: `http://localhost:8000`
 
 All endpoints are **tenant-scoped** by `tenant_id` and (where relevant) `event_id`.
 
+**OCR:** set `OCR_ENGINE=easyocr` (default) for EasyOCR + PyTorch — uses **GPU when `torch.cuda.is_available()`** (NVIDIA CUDA or AMD ROCm builds). Use `OCR_ENGINE=paddle` only if PaddleOCR works on your machine (slow cold start; static inference can fail with `std::exception` on some setups).
+
+**Indexing progress:** when stderr is a TTY, `tqdm` shows a **per-asset** bar (purge → faces → OCR → ASR → VLM) and a **batch** bar over files. Set `INDEXING_PROGRESS=0` to disable, or `INDEXING_PROGRESS=1` to force on (e.g. piped logs).
+
 ## Health
 
 - `GET /health`
@@ -34,7 +38,8 @@ curl -s -X POST http://localhost:8000/events \
 **File or folder (batch):** `tenant_id`, `event_id`, `path` (absolute or relative to backend project root), optional `recursive` (default `true`). All files with known image/video extensions under that path are registered and indexed in one request.
 
 Response — single: `{ "asset_id", "insights_generated" }`.  
-Response — batch: `{ "batch": true, "count", "assets": [{ "asset_id", "media_path", "media_type", "insights_generated" }, ...] }`.
+Response — batch: `{ "batch": true, "count", "failed", "assets": [{ "asset_id", "media_path", "media_type", "insights_generated", "error" }, ...] }`.  
+`failed` is how many files raised during indexing; `error` is `null` on success or a string message on failure (batch still returns **200** so the rest of the folder can finish).
 
 Examples:
 
@@ -47,7 +52,7 @@ curl -s -X POST http://localhost:8000/assets \
 # Whole folder, recursive
 curl -s -X POST http://localhost:8000/assets \
   -H 'Content-Type: application/json' \
-  -d '{"tenant_id":"tenant_a","event_id":"event_...","path":"/path/to/event_media","recursive":true}' | jq .
+  -d '{"tenant_id":"tenant_a","event_id":"event_...","path":"/absolute/or/relative/path/to/event_media","recursive":true}' | jq .
 ```
 
 ## Event context + semantic search
@@ -55,22 +60,14 @@ curl -s -X POST http://localhost:8000/assets \
 - `GET /events/{event_id}/context?tenant_id=...`
   - Optional filters: `insight_type=...`, `person_id=...`
 - `GET /events/{event_id}/search?tenant_id=...&q=...&limit=20`
-  - Requires stage2 semantic enabled *and* pgvector available; otherwise returns best-effort results (may be empty).
+  - Requires pgvector data to exist; returns best-effort results (may be empty if Postgres/pgvector is unavailable or no vectors were upserted yet).
 
 ## Planner + rendering
 
 - `POST /requests/plan`
 - `POST /requests/render`
 - `POST /requests/feedback/regenerate`
-
-Render output streaming (MP4):
-
 - `GET /renders/{render_job_id}/video?tenant_id=...`
-
-Notes:
-
-- Only works when the render job status is `completed`.
-- Intended for the frontend to embed via a `<video>` tag.
 
 All three accept mostly the same core request fields:
 
@@ -87,6 +84,12 @@ Regenerate endpoint differences:
 
 - Uses `exclude_asset_ids` (note name change vs `excluded_asset_ids`)
 - Does not accept `include_faces`
+
+Render video fetch:
+
+- Once a render job has `status="completed"` and `output_path` set, download it via:
+
+  - `GET /renders/{render_job_id}/video?tenant_id=...` → `video/mp4` file response
 
 ## Cleanup
 

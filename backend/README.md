@@ -12,6 +12,10 @@ FastAPI backend for Stage 1 of the MVP:
 
 Stage 2 features (OCR, ASR, semantic embeddings) are intentionally deferred but schema hooks are preserved.
 
+## Configuration
+
+- Environment: copy `backend/.env.example` to `backend/.env` and adjust. The backend loads **only** `backend/.env` (not a repo-root file); shell exports still override.
+
 ## Persistence
 
 - Runtime state is persisted in SQLite at `storage/videowala.db` by default.

@@ -2,11 +2,12 @@
 
 ## Implementation status
 
-The current codebase does **not** require GPUs to run the happy-path demo:
+The repo supports two runtime modes at the config level, but sizing and operational guidance here assumes **real model mode**:
 
-- Indexing uses deterministic stubs by default (`stage2_stub_models=True`).
-- Rendering relies on `ffmpeg` (CPU).
-- Stage 2 “real model” execution (OCR/ASR/embeddings) can be enabled, which changes sizing needs materially.
+- **Real mode (GPU preferred)**: `DEV_MODE=false` (or unset) → real model execution (VLM/OCR/ASR/embeddings), which drives the actual hardware needs below.
+- **Dev mode (stubbed)**: `DEV_MODE=true` → deterministic stubbed model outputs for tests/CI only; not representative of production sizing.
+
+Rendering relies on `ffmpeg` (CPU).
 
 ```mermaid
 flowchart LR

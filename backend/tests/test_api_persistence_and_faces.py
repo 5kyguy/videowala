@@ -13,7 +13,6 @@ def setup_function() -> None:
 
 
 def test_events_are_persisted_across_clients() -> None:
-    settings.db_path = "storage/test_api.db"
     client_a = TestClient(app)
     payload = {"tenant_id": "tenant_a", "title": "Persisted Event", "event_type": "wedding"}
     created = client_a.post("/events", json=payload)
@@ -28,7 +27,6 @@ def test_events_are_persisted_across_clients() -> None:
 
 
 def test_face_enrollment_and_match_routes_work() -> None:
-    settings.db_path = "storage/test_api.db"
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Event", "event_type": "party"}).json()
     event_id = event["id"]
@@ -64,7 +62,6 @@ def test_face_enrollment_and_match_routes_work() -> None:
 
 
 def test_face_endpoints_reject_cross_tenant_access() -> None:
-    settings.db_path = "storage/test_api.db"
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Event", "event_type": "party"}).json()
     event_id = event["id"]

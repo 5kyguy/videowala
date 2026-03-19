@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from ..db import now_utc
 from ..repositories import (
     AssetRepository,
@@ -18,22 +16,7 @@ from .embeddings import embedding_service
 from .faces import face_service
 from .ocr import ocr_service
 from .privacy import audit_action
-
-
-def _stub_vlm_caption(asset: Asset) -> str:
-    name = Path(asset.media_path).stem.replace("_", " ")
-    return f"Media summary for {name}. This is a Stage-1 SmolVLM context stub."
-
-
-def _stub_vlm_tags(asset: Asset) -> list[str]:
-    base = Path(asset.media_path).stem.lower()
-    tags = ["event", asset.media_type]
-    if "dance" in base:
-        tags.extend(["performance", "group"])
-    if "ride" in base:
-        tags.extend(["outdoor", "motion"])
-    return tags
-
+from .vlm import vlm_service
 
 def _stub_face_matches(asset: Asset) -> list[dict]:
     detections = face_service.detect_faces(asset.media_path)
@@ -58,15 +41,30 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
     InsightRepository.delete_for_asset(
         event_id=asset.event_id,
         asset_id=asset.id,
-        insight_types=[InsightType.vlm_caption.value, InsightType.vlm_tags.value, InsightType.face_detections.value, InsightType.face_matches.value],
+        insight_types=[
+            InsightType.vlm_caption.value,
+            InsightType.vlm_tags.value,
+            InsightType.face_detections.value,
+            InsightType.face_matches.value,
+        ],
     )
+
     detections = face_service.detect_faces(asset.media_path)
     matches = _stub_face_matches(asset)
-    ocr_items = ocr_service.extract(asset.media_path)
+
+    ocr_items, ocr_model = ocr_service.extract(asset.media_path)
+
     asr_segments = asr_service.transcribe(asset.media_path) if asset.media_type == "video" else []
 
     ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
     asr_text_joined = " ".join([seg.get("text", "") for seg in asr_segments]).strip()
+
+    vlm = vlm_service.caption_and_tags(
+        media_path=asset.media_path,
+        media_type=asset.media_type,
+        scratch_root=settings.scratch_root,
+    )
+
     insights = [
         AssetInsight(
             id=next_id("insight"),
@@ -74,7 +72,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.vlm_caption,
-            payload={"text": _stub_vlm_caption(asset), "model": "HuggingFaceTB/SmolVLM2-2.2B-Instruct"},
+            payload={"text": vlm.caption, "model": vlm.model},
             confidence=0.65,
             created_at=now_utc(),
         ),
@@ -84,7 +82,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.vlm_tags,
-            payload={"tags": _stub_vlm_tags(asset)},
+            payload={"tags": vlm.tags, "model": vlm.model},
             confidence=0.62,
             created_at=now_utc(),
         ),
@@ -117,7 +115,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.ocr_text,
-            payload={"items": ocr_items, "model": ocr_service.model_name},
+            payload={"items": ocr_items, "model": ocr_model},
             confidence=0.6 if ocr_items else 0.0,
             created_at=now_utc(),
         )
@@ -136,8 +134,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
         )
     )
 
-    caption_text = _stub_vlm_caption(asset)
-    combined = "\n".join([caption_text, asr_text_joined, ocr_text_joined]).strip()
+    combined = "\n".join([vlm.caption, asr_text_joined, ocr_text_joined]).strip()
     embed = embedding_service.embed_text(combined)
     try:
         row_id = upsert_asset_vector(

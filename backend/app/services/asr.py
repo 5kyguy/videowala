@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import subprocess
 from pathlib import Path
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
 
 
 def _stub_segments(media_path: str) -> list[dict]:
@@ -17,7 +21,7 @@ class AsrService:
     def model_name(self) -> str:
         return "faster-whisper (large-v3-turbo)"
 
-    def _extract_audio(self, video_path: Path, out_path: Path) -> None:
+    def _extract_audio(self, video_path: Path, out_path: Path) -> bool:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             "ffmpeg",
@@ -33,13 +37,25 @@ class AsrService:
             "wav",
             str(out_path),
         ]
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as exc:
+            err = (exc.stderr or exc.stdout or "").strip()
+            logger.warning(
+                "ffmpeg audio extract failed for %s (exit %s): %s",
+                video_path.name,
+                exc.returncode,
+                err[:800] if err else "(no stderr)",
+            )
+            return False
+        return True
 
     def transcribe(self, media_path: str) -> list[dict]:
         if settings.stage2_stub_models:
             return _stub_segments(media_path)
         target = Path(media_path)
-        if not target.exists() or target.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}:
+        # ASR is intentionally video-only.
+        if not target.exists() or target.suffix.lower() not in VIDEO_EXTS:
             return []
         try:
             from faster_whisper import WhisperModel
@@ -48,7 +64,8 @@ class AsrService:
 
         scratch = Path(settings.scratch_root) / "asr"
         wav = scratch / f"{target.stem}.wav"
-        self._extract_audio(target, wav)
+        if not self._extract_audio(target, wav):
+            return []
         model = WhisperModel("large-v3-turbo", device="cpu", compute_type="int8")
         segments, _info = model.transcribe(str(wav))
         out = []

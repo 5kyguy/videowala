@@ -170,13 +170,15 @@ def _render_from_inputs(input_files: list[str], output_file: str, duration_secon
 
 
 def _burn_subtitles(input_file: Path, output_file: Path, srt_path: Path) -> None:
+    # ffmpeg subtitles filter needs ':' escaped in the path; build it outside the f-string to avoid backslash issues.
+    srt_escaped = str(srt_path).replace(":", r"\:")
     cmd = [
         "ffmpeg",
         "-y",
         "-i",
         str(input_file),
         "-vf",
-        f"subtitles={str(srt_path).replace(':', '\\\\:')}",
+        f"subtitles={srt_escaped}",
         "-an",
         "-c:v",
         "libx264",

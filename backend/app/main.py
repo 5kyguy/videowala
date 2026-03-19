@@ -1,5 +1,26 @@
 from __future__ import annotations
 
+import warnings
+
+# Quiet third-party noise during model inference (EasyOCR / requests).
+warnings.filterwarnings(
+    "ignore",
+    message=".*pin_memory.*",
+    category=UserWarning,
+)
+# Importing `requests` runs a version check that can warn before we could register a category filter;
+# keep `chardet>=3.0.2,<6` in requirements (see comment there). This catches any similar future noise.
+warnings.filterwarnings(
+    "ignore",
+    message=r"urllib3 \(.*\) or chardet \(.*\)/charset_normalizer \(.*\) doesn't match a supported version!",
+)
+try:
+    from requests import RequestsDependencyWarning
+
+    warnings.filterwarnings("ignore", category=RequestsDependencyWarning)
+except Exception:
+    pass
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

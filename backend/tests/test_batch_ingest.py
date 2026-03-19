@@ -12,7 +12,6 @@ from app.main import app
 def setup_function() -> None:
     reset_database_for_tests("storage/test_batch_ingest.db")
     settings.stage2_stub_models = True
-    settings.db_path = "storage/test_batch_ingest.db"
 
 
 def test_batch_ingest_folder_detects_media() -> None:

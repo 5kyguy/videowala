@@ -12,10 +12,10 @@
   - Scratch work uses `./tmp/<tenant_id>/<event_id>/...` (repo root) and is cleaned up after renders.
 - **Indexing**:
   - Runs synchronously today (API calls `run_index_job()` inline).
-  - Produces `asset_insights` rows (caption/tags + face detections/matches; stage2 optionally adds OCR/ASR + semantic vectors).
+  - Produces `asset_insights` rows (caption/tags + face detections/matches, OCR/ASR text, and semantic embedding metadata).
 - **Planning**: Deterministic “planner skeleton” that returns a strict action list (`PlannerPlan`).
 - **Rendering**: Deterministic ffmpeg pipeline (prepare per-asset clips → concat → optional subtitles/overlays).
-- **OCR, ASR, semantic embeddings**: always indexed when assets are processed; vectors use **Postgres + pgvector** (best-effort if Postgres is unavailable).
+- **OCR, ASR, semantic embeddings**: invoked as part of indexing; OCR/ASR run against media, and semantic vectors are written to **Postgres + pgvector** when available (best-effort if Postgres is unavailable).
 
 ## System diagram
 

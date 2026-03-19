@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import sys
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -28,6 +30,8 @@ from ..services.planner import build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
 from ..services.rendering import UnsafeRenderCommandError, create_render_job, execute_render_job
 from ..workers.index_worker import run_index_job
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -88,24 +92,54 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
                 "Supported: common image extensions (jpg, png, …) and video (mp4, mov, mkv, …).",
             )
         assets_out: list[dict] = []
-        for abs_path, mtype in pairs:
+        file_iter = pairs
+        if settings.indexing_show_progress:
+            try:
+                from tqdm import tqdm
+
+                file_iter = tqdm(
+                    pairs,
+                    desc="Batch ingest",
+                    unit="file",
+                    file=sys.stderr,
+                    dynamic_ncols=True,
+                    leave=True,
+                )
+            except ImportError:
+                pass
+        failed = 0
+        for abs_path, mtype in file_iter:
             asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
-            n = run_index_job(asset.id)
-            assets_out.append(
-                {
-                    "asset_id": asset.id,
-                    "media_path": str(abs_path),
-                    "media_type": mtype,
-                    "insights_generated": n,
-                }
-            )
+            try:
+                n = run_index_job(asset.id)
+                assets_out.append(
+                    {
+                        "asset_id": asset.id,
+                        "media_path": str(abs_path),
+                        "media_type": mtype,
+                        "insights_generated": n,
+                        "error": None,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed += 1
+                logger.exception("Indexing failed for %s", abs_path)
+                assets_out.append(
+                    {
+                        "asset_id": asset.id,
+                        "media_path": str(abs_path),
+                        "media_type": mtype,
+                        "insights_generated": 0,
+                        "error": str(exc),
+                    }
+                )
         audit_action(
             payload.tenant_id,
             payload.event_id,
             "batch_ingest_completed",
-            {"count": len(assets_out), "root": payload.path},
+            {"count": len(assets_out), "failed": failed, "root": payload.path},
         )
-        return {"batch": True, "count": len(assets_out), "assets": assets_out}
+        return {"batch": True, "count": len(assets_out), "failed": failed, "assets": assets_out}
 
     assert payload.media_path is not None and payload.media_type is not None
     asset = register_asset(
