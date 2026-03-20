@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Install host dependencies for VideoWala on Ubuntu 24.04 (Noble):
-#   Docker (+ Compose plugin), Python 3.11, NVIDIA drivers, ffmpeg/media libs, Node.js, Yarn (Corepack).
+#   Docker (+ Compose plugin), Python 3.11, NVIDIA drivers, ffmpeg/media libs, Node.js, Yarn (Corepack), ngrok.
 #
 # Usage (on the server):
-#   sudo ./tools/install_ubuntu_server_deps.sh
+#   sudo ./scripts/setup_server.sh
 #
 # After a successful NVIDIA driver install, reboot once so the new kernel module loads.
 #
@@ -187,6 +187,25 @@ install_yarn() {
   corepack prepare yarn@stable --activate
 }
 
+install_ngrok() {
+  if command -v ngrok &>/dev/null; then
+    log "skip ngrok (already on PATH)"
+    return
+  fi
+  log "installing ngrok (official apt repository)"
+  curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc -o /etc/apt/trusted.gpg.d/ngrok.asc
+  chmod a+r /etc/apt/trusted.gpg.d/ngrok.asc
+  echo "deb https://ngrok-agent.s3.amazonaws.com bookworm main" >/etc/apt/sources.list.d/ngrok.list
+  apt_update
+  apt-get install -y --no-install-recommends ngrok
+  log "configure ngrok: ngrok config add-authtoken <token>"
+}
+
+upgrade_apt() {
+  apt-get update -qq
+  apt-get upgrade -y --no-install-recommends
+}
+
 main() {
   install_base_apt
   install_docker
@@ -195,8 +214,10 @@ main() {
   install_media_libs
   install_node
   install_yarn
+  install_ngrok
+  upgrade_apt
   log "done."
-  log "next: reboot if NVIDIA was newly installed, then verify: nvidia-smi, docker run --rm hello-world, python3.11 -V, node -v, yarn -v, ffmpeg -version"
+  log "next: reboot if NVIDIA was newly installed, then verify: nvidia-smi, docker run --rm hello-world, python3.11 -V, node -v, yarn -v, ffmpeg -version, ngrok version"
 }
 
 main "$@"

@@ -58,6 +58,16 @@ Configure backend URL (optional):
 
 - Set `VITE_API_BASE_URL` (see `frontend/.env.example`)
 
+### Frontend via ngrok (no custom domain)
+
+1. Copy `frontend/.env.example` → `frontend/.env`.
+2. Set **`VITE_DEV_PUBLIC_HOST`** to the hostname ngrok gives you (e.g. `abc123.ngrok-free.app`) — no `https://`.
+3. Set **`VITE_API_BASE_URL`** to whatever URL the **browser** must use to reach FastAPI. Same machine: if the API is only on `localhost:8000`, run a **second** ngrok tunnel to port `8000` and point `VITE_API_BASE_URL` at that `https://…` URL (CORS is already permissive).
+4. From `frontend/`: `yarn install` then `yarn dev` (port `5173`).
+5. Start the tunnel: `ngrok http 5173` (or your ngrok UI equivalent).
+
+Restart `yarn dev` after changing `.env` (Vite reads it at startup).
+
 ## Demo media paths
 
 The system currently registers **paths** (it does not upload bytes yet). The frontend defaults to ingesting from the repo’s top-level `media/` folder.
