@@ -22,6 +22,14 @@ pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
 
+To reach the API from **another machine** (browser on your laptop, another host), bind on all interfaces; uvicorn’s default is `127.0.0.1` only, so the public IP will refuse connections until you do:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+(`--reload` is optional.) Open the host firewall for `8000/tcp` if needed; ensure any cloud “security group” allows it too.
+
 Configure the backend via `backend/.env` (copy from `backend/.env.example`). There is no repo-root `.env` for the API.
 
 Key settings (see `backend/app/config.py`):
@@ -65,6 +73,8 @@ Configure backend URL (optional):
 3. Set **`VITE_API_BASE_URL`** to whatever URL the **browser** must use to reach FastAPI. Same machine: if the API is only on `localhost:8000`, run a **second** ngrok tunnel to port `8000` and point `VITE_API_BASE_URL` at that `https://…` URL (CORS is already permissive).
 4. From `frontend/`: `yarn install` then `yarn dev` (port `5173`).
 5. Start the tunnel: `ngrok http 5173` (or your ngrok UI equivalent).
+
+Run **`yarn dev`** and **`ngrok`** in separate long-lived shells so they survive SSH disconnects—e.g. **`tmux`** (one pane or window each), **`screen`**, or **`systemd`** if you want them as services.
 
 Restart `yarn dev` after changing `.env` (Vite reads it at startup).
 
