@@ -1,10 +1,12 @@
 frontend/node_modules/
 .pytest_cache/
-
+.311venv/
 storage/
 tmp/
-media/
+media*/
+wedding*/
 .markdownlint.json
 *.pyc
+yarn.lock
 
 .env

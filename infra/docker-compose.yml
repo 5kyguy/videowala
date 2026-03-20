@@ -1,9 +1,0 @@
-services:
-  postgres:
-    image: pgvector/pgvector:pg16
-    environment:
-      POSTGRES_DB: videowala
-      POSTGRES_USER: videowala
-      POSTGRES_PASSWORD: videowala
-    ports:
-      - "5432:5432"
