@@ -70,9 +70,11 @@ Configure backend URL (optional):
 
 1. Copy `frontend/.env.example` → `frontend/.env`.
 2. Set **`VITE_DEV_PUBLIC_HOST`** to the hostname ngrok gives you (e.g. `abc123.ngrok-free.app`) — no `https://`.
-3. Set **`VITE_API_BASE_URL`** to whatever URL the **browser** must use to reach FastAPI. Same machine: if the API is only on `localhost:8000`, run a **second** ngrok tunnel to port `8000` and point `VITE_API_BASE_URL` at that `https://…` URL (CORS is already permissive).
-4. From `frontend/`: `yarn install` then `yarn dev` (port `5173`).
-5. Start the tunnel: `ngrok http 5173` (or your ngrok UI equivalent).
+3. Set **`VITE_API_BASE_URL=/api`** so the browser only talks to the **same** HTTPS origin as the UI. Vite proxies `/api` → FastAPI on `127.0.0.1:8000` (see `vite.config.ts`). This avoids **mixed content** errors (an `https://` ngrok page cannot call `http://your-vps:8000` directly).
+4. Ensure the API is listening on the same machine as Vite (`uvicorn … --host 0.0.0.0 --port 8000`). The proxy uses `VITE_API_PROXY_TARGET` if you need a non-default target (defaults to `http://127.0.0.1:8000`).
+5. **Alternative:** run a **second** ngrok tunnel to port `8000` and set **`VITE_API_BASE_URL`** to that tunnel’s `https://…` URL (no proxy).
+6. From `frontend/`: `npm install` then `npm run dev` (port `5173`).
+7. Start the tunnel: `ngrok http 5173` (or your ngrok UI equivalent).
 
 Run **`yarn dev`** and **`ngrok`** in separate long-lived shells so they survive SSH disconnects—e.g. **`tmux`** (one pane or window each), **`screen`**, or **`systemd`** if you want them as services.
 
