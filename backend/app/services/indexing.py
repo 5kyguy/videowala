@@ -22,10 +22,11 @@ from .ocr import ocr_service
 from .privacy import audit_action
 from .vlm import vlm_service
 
-def _stub_face_matches(asset: Asset) -> list[dict]:
-    detections = face_service.detect_faces(asset.media_path)
-    references = []
+def _face_detections_and_matches(asset: Asset, analysis_media_path: str) -> tuple[list[dict], list[dict]]:
+    """Single detection pass on the same path used for VLM/OCR (proxy for video), then match against event references."""
+    detections = face_service.detect_faces(analysis_media_path)
     person_lookup = {person.id: person.display_name for person in PersonRepository.list_for_event(asset.tenant_id, asset.event_id)}
+    references = []
     for ref in PersonReferenceRepository.list_for_event(asset.tenant_id, asset.event_id):
         references.append(
             {
@@ -34,7 +35,8 @@ def _stub_face_matches(asset: Asset) -> list[dict]:
                 "embedding": ref.embedding,
             }
         )
-    return face_service.match_faces(detections, references)
+    matches = face_service.match_faces(detections, references)
+    return detections, matches
 
 
 def _segment_for_asset(asset: Asset, duration_s: float) -> list[tuple[float, float]]:
@@ -102,8 +104,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
     proxy = ensure_asset_proxy(asset)
     analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
 
-    detections = face_service.detect_faces(analysis_media_path)
-    matches = _stub_face_matches(asset)
+    detections, matches = _face_detections_and_matches(asset, analysis_media_path)
 
     ocr_items, ocr_model = ocr_service.extract(analysis_media_path)
 
@@ -264,6 +265,48 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
     InsightRepository.create_many(insights)
     audit_action(asset.tenant_id, asset.event_id, "asset_indexed", {"asset_id": asset.id, "insight_count": len(insights)})
     return insights
+
+
+def reindex_face_insights_for_asset(asset_id: str) -> None:
+    """Replace only face detection/match insights; leaves VLM, OCR, ASR, embeddings unchanged. Fast path for UI reindex."""
+    asset = AssetRepository.get(asset_id)
+    if asset is None:
+        raise KeyError(f"Asset not found: {asset_id}")
+    InsightRepository.delete_for_asset(
+        event_id=asset.event_id,
+        asset_id=asset.id,
+        insight_types=[
+            InsightType.face_detections.value,
+            InsightType.face_matches.value,
+        ],
+    )
+    proxy = ensure_asset_proxy(asset)
+    analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
+    detections, matches = _face_detections_and_matches(asset, analysis_media_path)
+    insights = [
+        AssetInsight(
+            id=next_id("insight"),
+            tenant_id=asset.tenant_id,
+            event_id=asset.event_id,
+            asset_id=asset.id,
+            insight_type=InsightType.face_detections,
+            payload={"detections": detections, "model": face_service.model_name},
+            confidence=0.58 if detections else 0.0,
+            created_at=now_utc(),
+        ),
+        AssetInsight(
+            id=next_id("insight"),
+            tenant_id=asset.tenant_id,
+            event_id=asset.event_id,
+            asset_id=asset.id,
+            insight_type=InsightType.face_matches,
+            payload={"matches": matches, "model": face_service.model_name},
+            confidence=0.51,
+            created_at=now_utc(),
+        ),
+    ]
+    InsightRepository.create_many(insights)
+    audit_action(asset.tenant_id, asset.event_id, "face_insights_reindexed", {"asset_id": asset.id})
 
 
 def get_event_context(event_id: str) -> dict:

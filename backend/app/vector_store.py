@@ -27,7 +27,8 @@ def _connect() -> Any:
         import psycopg
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("psycopg is required for pgvector support") from exc
-    return psycopg.connect(settings.pg_dsn)
+    # Avoid indefinite hangs when Postgres is down or unreachable (indexing would otherwise block here).
+    return psycopg.connect(settings.pg_dsn, connect_timeout=10)
 
 
 def migrate_pgvector() -> None:

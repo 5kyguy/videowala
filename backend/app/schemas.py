@@ -125,7 +125,7 @@ class ContentRequestCreate(BaseModel):
     event_id: str
     output_type: OutputType
     prompt: str = Field(min_length=5)
-    target_duration_seconds: int = Field(default=60, ge=10, le=3600)
+    target_duration_seconds: int = Field(default=60, ge=5, le=3600)
     include_faces: list[str] = Field(default_factory=list)
     include_asset_ids: list[str] = Field(default_factory=list)
     excluded_asset_ids: list[str] = Field(default_factory=list)
@@ -191,7 +191,7 @@ class FeedbackUpdate(BaseModel):
     event_id: str
     output_type: OutputType = OutputType.highlight_reel
     prompt: str = Field(default="Regenerate with updated include/exclude constraints.", min_length=5)
-    target_duration_seconds: int = Field(default=60, ge=10, le=3600)
+    target_duration_seconds: int = Field(default=60, ge=5, le=3600)
     include_asset_ids: list[str] = Field(default_factory=list)
     exclude_asset_ids: list[str] = Field(default_factory=list)
     include_media_types: list[Literal["image", "video"]] = Field(default_factory=list)

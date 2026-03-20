@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createApiClient, getDefaultApiBaseUrl } from "./api";
-import type { Event, EventSummary, OutputType, RenderJobListItem } from "./types";
+import type { Event, EventSummary, OutputType, Person, PersonFaceReferenceListItem, RenderJobListItem } from "./types";
 
 const PROFILE_STORAGE_KEY = "videowala_profiles";
 const DEFAULT_OUTPUT_TYPE: OutputType = "highlight_reel";
@@ -38,6 +38,10 @@ export default function App() {
   const [selectedEventId, setSelectedEventId] = useState("");
   const [summary, setSummary] = useState<EventSummary | null>(null);
   const [renders, setRenders] = useState<RenderJobListItem[]>([]);
+  /** When set, preview panel shows this job (inline video if completed). */
+  const [selectedRenderJobId, setSelectedRenderJobId] = useState<string | null>(null);
+  const [persons, setPersons] = useState<Person[]>([]);
+  const [faceRefs, setFaceRefs] = useState<PersonFaceReferenceListItem[]>([]);
 
   const [eventTitle, setEventTitle] = useState("Demo Event");
   const [eventType, setEventType] = useState("wedding");
@@ -47,6 +51,11 @@ export default function App() {
   const [ingestPath, setIngestPath] = useState("media");
   const [ingestRecursive, setIngestRecursive] = useState(true);
   const [ingestNote, setIngestNote] = useState("");
+
+  const [newPersonName, setNewPersonName] = useState("");
+  const [newPersonPhoto, setNewPersonPhoto] = useState<File | null>(null);
+  const [extraRefPersonId, setExtraRefPersonId] = useState("");
+  const [extraRefPhoto, setExtraRefPhoto] = useState<File | null>(null);
 
   const [prompt, setPrompt] = useState("Create a 60-second highlight focused on dancing.");
   const [outputType, setOutputType] = useState<OutputType>(DEFAULT_OUTPUT_TYPE);
@@ -59,6 +68,7 @@ export default function App() {
   const [lastRenderNote, setLastRenderNote] = useState("");
 
   const [loading, setLoading] = useState(false);
+  const [faceReindexBusy, setFaceReindexBusy] = useState(false);
   const [status, setStatus] = useState("Ready.");
   const [errorMessage, setErrorMessage] = useState("");
 
@@ -77,10 +87,20 @@ export default function App() {
     if (!selectedEventId) {
       setSummary(null);
       setRenders([]);
+      setPersons([]);
+      setFaceRefs([]);
+      setSelectedRenderJobId(null);
       return;
     }
+    setSelectedRenderJobId(null);
     void refreshSelectedEvent();
   }, [selectedEventId, tenantId, apiBaseUrl]);
+
+  useEffect(() => {
+    if (selectedRenderJobId && !renders.some((r) => r.id === selectedRenderJobId)) {
+      setSelectedRenderJobId(null);
+    }
+  }, [renders, selectedRenderJobId]);
 
   useEffect(() => {
     if (!selectedEventId || !summary) return;
@@ -116,6 +136,23 @@ export default function App() {
     summary?.stats.index_jobs_queued,
     summary?.stats.index_jobs_running
   ]);
+
+  useEffect(() => {
+    if (!selectedEventId) return;
+    const busy = renders.some((r) => r.status === "queued" || r.status === "running");
+    if (!busy) return;
+    const id = window.setInterval(() => {
+      void (async () => {
+        try {
+          const eventRenders = await api.listEventRenders(tenantId, selectedEventId);
+          setRenders(eventRenders.renders);
+        } catch {
+          /* ignore */
+        }
+      })();
+    }, 3000);
+    return () => window.clearInterval(id);
+  }, [selectedEventId, tenantId, api, renders]);
 
   async function runAction(action: () => Promise<void>) {
     setLoading(true);
@@ -158,6 +195,27 @@ export default function App() {
     });
   }
 
+  async function loadEventDashboard() {
+    if (!selectedEventId) return;
+    if (
+      events.length > 0 &&
+      !events.some((e) => e.id === selectedEventId && e.tenant_id === tenantId)
+    ) {
+      return;
+    }
+    const [eventSummary, eventRenders, personsRes, refsRes] = await Promise.all([
+      api.getEventSummary(tenantId, selectedEventId),
+      api.listEventRenders(tenantId, selectedEventId),
+      api.listPersons(tenantId, selectedEventId),
+      api.listEventPersonReferences(tenantId, selectedEventId)
+    ]);
+    setSummary(eventSummary);
+    setRenders(eventRenders.renders);
+    setPersons(personsRes.persons);
+    setFaceRefs(refsRes.references);
+    setStatus(`Loaded dashboard for ${selectedEventId}.`);
+  }
+
   async function refreshSelectedEvent() {
     if (!selectedEventId) return;
     if (
@@ -167,13 +225,7 @@ export default function App() {
       return;
     }
     await runAction(async () => {
-      const [eventSummary, eventRenders] = await Promise.all([
-        api.getEventSummary(tenantId, selectedEventId),
-        api.listEventRenders(tenantId, selectedEventId)
-      ]);
-      setSummary(eventSummary);
-      setRenders(eventRenders.renders);
-      setStatus(`Loaded dashboard for ${selectedEventId}.`);
+      await loadEventDashboard();
     });
   }
 
@@ -216,6 +268,59 @@ export default function App() {
       setStatus(`Ingest registered ${response.count} file(s) for ${selectedEventId}; indexing continues in the background.`);
       await refreshSelectedEvent();
     });
+  }
+
+  async function handleAddPersonWithPhoto(e: FormEvent) {
+    e.preventDefault();
+    if (!selectedEventId || !newPersonName.trim()) {
+      setErrorMessage("Enter a display name for the person.");
+      return;
+    }
+    if (!newPersonPhoto) {
+      setErrorMessage("Choose a reference photo (stored for this event on the backend).");
+      return;
+    }
+    await runAction(async () => {
+      const person = await api.createPerson({
+        tenant_id: tenantId,
+        event_id: selectedEventId,
+        display_name: newPersonName.trim()
+      });
+      await api.uploadFaceReference(tenantId, selectedEventId, person.id, newPersonPhoto);
+      setNewPersonName("");
+      setNewPersonPhoto(null);
+      setStatus(`Added person "${person.display_name}" with a face reference.`);
+      await refreshSelectedEvent();
+    });
+  }
+
+  async function handleAddExtraFaceReference(e: FormEvent) {
+    e.preventDefault();
+    if (!selectedEventId || !extraRefPersonId || !extraRefPhoto) {
+      setErrorMessage("Select an existing person and choose a photo.");
+      return;
+    }
+    await runAction(async () => {
+      await api.uploadFaceReference(tenantId, selectedEventId, extraRefPersonId, extraRefPhoto);
+      setExtraRefPhoto(null);
+      setStatus("Added another reference photo for matching.");
+      await refreshSelectedEvent();
+    });
+  }
+
+  async function handleReindexFaces() {
+    if (!selectedEventId || faceReindexBusy) return;
+    setFaceReindexBusy(true);
+    setErrorMessage("");
+    try {
+      const result = await api.reindexFaces(selectedEventId, tenantId);
+      setStatus(`Face matching updated for ${result.asset_count} asset(s) (fast path — face insights only).`);
+      await loadEventDashboard();
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error));
+    } finally {
+      setFaceReindexBusy(false);
+    }
   }
 
   async function handleCreatePlan() {
@@ -263,7 +368,7 @@ export default function App() {
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
       setLastRenderNote(`Render job ${response.render_job.id} — ${response.render_job.status}.`);
-      setStatus(`Queued render ${response.render_job.id}.`);
+      setStatus(`Render ${response.render_job.id} — ${response.render_job.status} (runs in background; list updates every few seconds).`);
       await refreshSelectedEvent();
     });
   }
@@ -288,12 +393,15 @@ export default function App() {
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
       setLastRenderNote(`Render job ${response.render_job.id} — ${response.render_job.status}.`);
-      setStatus(`Regenerate queued: ${response.render_job.id}.`);
+      setStatus(`Regenerate ${response.render_job.id} — ${response.render_job.status} (background).`);
       await refreshSelectedEvent();
     });
   }
 
   const selectedEvent = events.find((event) => event.id === selectedEventId) ?? null;
+  const selectedRenderJob = selectedRenderJobId
+    ? renders.find((r) => r.id === selectedRenderJobId) ?? null
+    : null;
 
   return (
     <div className="page">
@@ -455,6 +563,108 @@ export default function App() {
           </section>
 
           <section className="card">
+            <h2>People &amp; face references</h2>
+            <p className="muted">
+              People are stored on this <strong>event</strong> only. Reference photos are uploaded to the backend and used
+              when indexing runs to match faces in your media. Add names and photos anytime; if media is already indexed,
+              use <strong>Re-run face matching</strong> to refresh face matches only (does not re-run VLM/OCR — usually
+              seconds, and the rest of the UI stays usable).
+            </p>
+            <form className="stack face-form" onSubmit={(e) => void handleAddPersonWithPhoto(e)}>
+              <h3>New person</h3>
+              <div className="workflow-grid">
+                <label>
+                  Display name
+                  <input
+                    value={newPersonName}
+                    onChange={(e) => setNewPersonName(e.target.value)}
+                    placeholder="e.g. Alex"
+                    disabled={!selectedEventId}
+                    autoComplete="off"
+                  />
+                </label>
+                <label>
+                  Reference photo
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    onChange={(e) => setNewPersonPhoto(e.target.files?.[0] ?? null)}
+                    disabled={!selectedEventId}
+                  />
+                </label>
+                <button type="submit" disabled={loading || !selectedEventId}>
+                  Add person
+                </button>
+              </div>
+            </form>
+            <form className="stack face-form" onSubmit={(e) => void handleAddExtraFaceReference(e)}>
+              <h3>Another photo for an existing person</h3>
+              <div className="workflow-grid">
+                <label>
+                  Person
+                  <select
+                    value={extraRefPersonId}
+                    onChange={(e) => setExtraRefPersonId(e.target.value)}
+                    disabled={!selectedEventId || persons.length === 0}
+                  >
+                    <option value="">— select —</option>
+                    {persons.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Photo
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,image/gif"
+                    onChange={(e) => setExtraRefPhoto(e.target.files?.[0] ?? null)}
+                    disabled={!selectedEventId || persons.length === 0}
+                  />
+                </label>
+                <button type="submit" disabled={loading || !selectedEventId || persons.length === 0}>
+                  Add reference
+                </button>
+              </div>
+            </form>
+            <div className="button-row" style={{ marginTop: 12 }}>
+              <button
+                type="button"
+                onClick={() => void handleReindexFaces()}
+                disabled={loading || faceReindexBusy || !selectedEventId}
+              >
+                {faceReindexBusy ? "Updating face matches…" : "Re-run face matching on all media"}
+              </button>
+            </div>
+            {faceRefs.length === 0 ? (
+              <p className="muted" style={{ marginTop: 12 }}>
+                No reference photos yet for this event.
+              </p>
+            ) : (
+              <ul className="face-ref-list">
+                {faceRefs.map((ref) => (
+                  <li key={ref.id} className="face-ref-item">
+                    <img
+                      className="face-ref-thumb"
+                      src={api.getFaceReferenceImageUrl(selectedEventId, ref.id, tenantId)}
+                      alt=""
+                      loading="lazy"
+                    />
+                    <div>
+                      <strong>{ref.display_name}</strong>
+                      <p className="muted small">
+                        {ref.id} · {new Date(ref.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+
+          <section className="card">
             <h2>Plan + render</h2>
             <p className="muted">
               Uses the same backend routes as the API docs: <code>/requests/plan</code>, <code>/requests/render</code>,{" "}
@@ -481,7 +691,7 @@ export default function App() {
                 Target duration (s)
                 <input
                   type="number"
-                  min={10}
+                  min={5}
                   max={3600}
                   value={durationSeconds}
                   onChange={(e) => setDurationSeconds(Number(e.target.value))}
@@ -545,25 +755,67 @@ export default function App() {
 
           <section className="card">
             <h2>Render Jobs</h2>
+            <p className="muted">Click a job to play the video here when it is completed.</p>
             {renders.length === 0 ? <p className="muted">No renders found for selected event.</p> : null}
-            <div className="render-list">
-              {renders.map((job) => (
-                <article key={job.id} className="render-item">
-                  <div>
-                    <strong>{job.id}</strong>
-                    <p className="muted">
-                      {job.status}
-                      {job.progress_percent != null ? ` · ${job.progress_percent}%` : ""}
-                      {job.error_message ? ` · ${job.error_message}` : ""} — {new Date(job.created_at).toLocaleString()}
+            <div className="render-jobs-layout">
+              <div className="render-list">
+                {renders.map((job) => (
+                  <article
+                    key={job.id}
+                    className={
+                      "render-item" + (selectedRenderJobId === job.id ? " render-item-selected" : "")
+                    }
+                  >
+                    <button
+                      type="button"
+                      className="render-item-select"
+                      onClick={() => setSelectedRenderJobId(job.id)}
+                    >
+                      <strong>{job.id}</strong>
+                      <p className="muted">
+                        {job.status}
+                        {job.progress_percent != null ? ` · ${job.progress_percent}%` : ""}
+                        {job.error_message ? ` · ${job.error_message}` : ""} — {new Date(job.created_at).toLocaleString()}
+                      </p>
+                    </button>
+                    {job.status === "completed" ? (
+                      <a
+                        className="render-open-tab"
+                        href={api.getRenderVideoUrl(job.id, tenantId)}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        Open in new tab
+                      </a>
+                    ) : null}
+                  </article>
+                ))}
+              </div>
+              <div className="render-preview-panel">
+                {selectedRenderJob ? (
+                  selectedRenderJob.status === "completed" ? (
+                    <div className="render-video-wrap">
+                      <video
+                        key={selectedRenderJob.id}
+                        className="render-preview-video"
+                        controls
+                        playsInline
+                        preload="metadata"
+                        src={api.getRenderVideoUrl(selectedRenderJob.id, tenantId)}
+                      />
+                      <p className="muted small render-preview-caption">{selectedRenderJob.id}</p>
+                    </div>
+                  ) : (
+                    <p className="muted render-preview-placeholder">
+                      <strong>{selectedRenderJob.id}</strong> is <strong>{selectedRenderJob.status}</strong>. The player
+                      appears when the job completes.
                     </p>
-                  </div>
-                  {job.status === "completed" ? (
-                    <a href={api.getRenderVideoUrl(job.id, tenantId)} target="_blank" rel="noreferrer">
-                      Open Video
-                    </a>
-                  ) : null}
-                </article>
-              ))}
+                  )
+                ) : (
+                  <p className="muted render-preview-placeholder">Select a render to preview.</p>
+                )}
+              </div>
             </div>
           </section>
         </main>

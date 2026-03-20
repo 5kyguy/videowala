@@ -1,4 +1,15 @@
-import type { Event, EventSummary, MediaType, OutputType, Person, PersonReference, PlannerPlan, RenderJob, RenderJobListItem } from "./types";
+import type {
+  Event,
+  EventSummary,
+  MediaType,
+  OutputType,
+  Person,
+  PersonFaceReferenceListItem,
+  PersonReference,
+  PlannerPlan,
+  RenderJob,
+  RenderJobListItem
+} from "./types";
 
 export type ApiClientConfig = {
   baseUrl: string;
@@ -22,6 +33,20 @@ async function request<T>(baseUrl: string, path: string, init?: RequestInit): Pr
       ...(init?.headers ?? {})
     },
     ...init
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    const detail = typeof payload?.detail === "string" ? payload.detail : "Request failed";
+    throw new ApiError(detail, response.status, payload);
+  }
+  return payload as T;
+}
+
+async function requestMultipart<T>(baseUrl: string, path: string, form: FormData): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    body: form
   });
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;
@@ -144,6 +169,23 @@ export function createApiClient(config: ApiClientConfig) {
         method: "POST",
         body: JSON.stringify(payload)
       }),
+    /** Upload a reference image; file is stored under the event in backend storage. */
+    uploadFaceReference: (tenantId: string, eventId: string, personId: string, file: File) => {
+      const fd = new FormData();
+      fd.append("file", file);
+      return requestMultipart<{ reference: { id: string; person_id: string; image_path: string; created_at: string } }>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}/persons/${encodeURIComponent(personId)}/face-reference?tenant_id=${encodeURIComponent(tenantId)}`,
+        fd
+      );
+    },
+    listEventPersonReferences: (tenantId: string, eventId: string) =>
+      request<{ event_id: string; references: PersonFaceReferenceListItem[] }>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}/person-references?tenant_id=${encodeURIComponent(tenantId)}`
+      ),
+    getFaceReferenceImageUrl: (eventId: string, referenceId: string, tenantId: string) =>
+      `${baseUrl}/events/${encodeURIComponent(eventId)}/person-references/${encodeURIComponent(referenceId)}/image?tenant_id=${encodeURIComponent(tenantId)}`,
     reindexFaces: (eventId: string, tenantId: string) =>
       request<{ status: string; asset_count: number }>(
         baseUrl,

@@ -166,7 +166,7 @@ button:disabled {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 10px;
 }
 
@@ -185,6 +185,19 @@ button:disabled {
   margin: 4px 0;
 }
 
+.render-jobs-layout {
+  display: grid;
+  gap: 14px;
+  margin-top: 10px;
+}
+
+@media (min-width: 900px) {
+  .render-jobs-layout {
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr);
+    align-items: start;
+  }
+}
+
 .render-list {
   display: grid;
   gap: 8px;
@@ -194,11 +207,80 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: center;
+  align-items: stretch;
   border: 1px solid #334155;
   border-radius: 10px;
-  padding: 10px;
+  padding: 0;
   background: #0b1220;
+  overflow: hidden;
+}
+
+.render-item-selected {
+  border-color: #22d3ee;
+  box-shadow: 0 0 0 1px #22d3ee inset;
+}
+
+.render-item-select {
+  flex: 1;
+  text-align: left;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  min-width: 0;
+}
+
+.render-item-select:hover {
+  background: rgba(34, 211, 238, 0.06);
+}
+
+.render-open-tab {
+  flex-shrink: 0;
+  align-self: center;
+  margin-right: 10px;
+  font-size: 13px;
+  color: #7dd3fc;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.render-open-tab:hover {
+  text-decoration: underline;
+}
+
+.render-preview-panel {
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 12px;
+  background: #020617;
+  min-height: 120px;
+}
+
+.render-video-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.render-preview-video {
+  width: 100%;
+  max-height: min(50vh, 420px);
+  border-radius: 8px;
+  background: #000;
+  vertical-align: middle;
+}
+
+.render-preview-caption {
+  margin: 0;
+  word-break: break-all;
+}
+
+.render-preview-placeholder {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.5;
 }
 
 .muted {
@@ -214,6 +296,43 @@ button:disabled {
 
 footer {
   margin-top: 14px;
+}
+
+.face-form h3 {
+  margin: 12px 0 0;
+  font-size: 15px;
+  color: #cbd5e1;
+}
+
+.face-ref-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.face-ref-item {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  padding: 10px;
+  background: #0b1220;
+}
+
+.face-ref-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  flex-shrink: 0;
+}
+
+.small {
+  font-size: 12px;
 }
 
 @media (max-width: 1000px) {

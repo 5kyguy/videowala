@@ -13,6 +13,8 @@ from ..services.rendering import execute_render_job
 logger = logging.getLogger(__name__)
 
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="videowala-worker")
+# Renders use a separate pool so a render is never queued behind long-running index jobs (same global pool starved the UI).
+_RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videowala-render")
 _LOCK = Lock()
 _INFLIGHT_INDEX: dict[str, str] = {}
 _INFLIGHT_RENDER: set[str] = set()
@@ -110,4 +112,4 @@ def submit_render_job(job_id: str) -> None:
             with _LOCK:
                 _INFLIGHT_RENDER.discard(job_id)
 
-    _EXECUTOR.submit(_task)
+    _RENDER_EXECUTOR.submit(_task)

@@ -699,6 +699,22 @@ class PersonRepository:
 
 class PersonReferenceRepository:
     @staticmethod
+    def get(reference_id: str) -> PersonReference | None:
+        with db_cursor() as cur:
+            row = cur.execute("SELECT * FROM person_references WHERE id = ?", (reference_id,)).fetchone()
+        if row is None:
+            return None
+        return PersonReference(
+            id=row["id"],
+            person_id=row["person_id"],
+            tenant_id=row["tenant_id"],
+            event_id=row["event_id"],
+            image_path=row["image_path"],
+            embedding=decode_json(row["embedding_json"]),
+            created_at=from_iso(row["created_at"]),
+        )
+
+    @staticmethod
     def create(reference: PersonReference) -> PersonReference:
         with db_cursor() as cur:
             cur.execute(

@@ -29,6 +29,16 @@ export type PersonReference = {
   created_at: string;
 };
 
+/** Metadata from GET /events/.../person-references (no embedding). */
+export type PersonFaceReferenceListItem = {
+  id: string;
+  person_id: string;
+  event_id: string;
+  display_name: string;
+  image_path: string;
+  created_at: string;
+};
+
 export type PlannerAction = {
   action: string;
   params: Record<string, unknown>;

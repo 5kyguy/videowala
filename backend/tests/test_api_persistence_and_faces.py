@@ -112,6 +112,34 @@ def test_event_summary_reports_dashboard_stats() -> None:
     assert body["stats"]["index_jobs_queued"] + body["stats"]["index_jobs_running"] + body["stats"]["index_jobs_completed"] + body["stats"]["index_jobs_failed"] == body["stats"]["index_jobs_total"]
 
 
+def test_face_reference_multipart_upload_list_and_image() -> None:
+    client = TestClient(app)
+    event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Face upload", "event_type": "party"}).json()
+    event_id = event["id"]
+    person = client.post(
+        "/persons",
+        json={"tenant_id": "tenant_a", "event_id": event_id, "display_name": "Jordan"},
+    ).json()
+    person_id = person["id"]
+    png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    up = client.post(
+        f"/events/{event_id}/persons/{person_id}/face-reference",
+        params={"tenant_id": "tenant_a"},
+        files={"file": ("ref.png", png_bytes, "image/png")},
+    )
+    assert up.status_code == 200
+    ref_id = up.json()["reference"]["id"]
+    listed = client.get(f"/events/{event_id}/person-references", params={"tenant_id": "tenant_a"})
+    assert listed.status_code == 200
+    refs = listed.json()["references"]
+    assert len(refs) == 1
+    assert refs[0]["display_name"] == "Jordan"
+    assert refs[0]["id"] == ref_id
+    img = client.get(f"/events/{event_id}/person-references/{ref_id}/image", params={"tenant_id": "tenant_a"})
+    assert img.status_code == 200
+    assert len(img.content) == len(png_bytes)
+
+
 def test_event_summary_and_render_list_reject_cross_tenant_access() -> None:
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Scoped", "event_type": "wedding"}).json()

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
+import mimetypes
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from ..config import settings
@@ -36,12 +37,12 @@ from ..schemas import (
 )
 from ..services.faces import face_service
 from ..services.ingest import create_asset_record, discover_media_files, purge_event_proxies, register_asset, resolve_ingest_path
-from ..services.indexing import get_event_context, get_event_context_filtered
+from ..services.indexing import get_event_context, get_event_context_filtered, reindex_face_insights_for_asset
 from ..services.search import semantic_search
 from ..services.planner import build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
 from ..services.rendering import UnsafeRenderCommandError, create_render_job
-from ..workers.index_worker import run_index_job, submit_index_job, submit_render_job
+from ..workers.index_worker import submit_index_job, submit_render_job
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,25 @@ def _assert_path_within_root(path: Path, root: Path) -> None:
         return
     if root_resolved not in resolved.parents:
         raise HTTPException(status_code=400, detail="Render output path is outside storage root.")
+
+
+_ALLOWED_FACE_REF_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".gif"}
+_MAX_FACE_UPLOAD_BYTES = 15 * 1024 * 1024
+
+
+def _face_refs_dir(tenant_id: str, event_id: str) -> Path:
+    base = Path(settings.storage_root) / tenant_id / event_id / "face_refs"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
+def _safe_face_filename(original: str) -> str:
+    p = Path(original)
+    ext = p.suffix.lower()
+    if ext not in _ALLOWED_FACE_REF_SUFFIXES:
+        ext = ".jpg"
+    stem = "".join(c for c in p.stem if c.isalnum() or c in "._-")[:64]
+    return f"{stem or 'photo'}{ext}"
 
 
 @router.post("/events", response_model=Event)
@@ -471,6 +491,109 @@ def add_person_reference(person_id: str, payload: PersonReferenceCreate) -> Pers
     return reference
 
 
+@router.post("/events/{event_id}/persons/{person_id}/face-reference")
+async def upload_face_reference(
+    event_id: str,
+    person_id: str,
+    tenant_id: str,
+    file: UploadFile = File(...),
+) -> dict:
+    """Store a reference face image under event-scoped storage and register its embedding."""
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    person = PersonRepository.get(person_id)
+    if person is None:
+        raise HTTPException(status_code=404, detail="Person not found.")
+    if person.event_id != event_id:
+        raise HTTPException(status_code=400, detail="Person does not belong to this event.")
+
+    raw = await file.read()
+    if len(raw) > _MAX_FACE_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large (max 15MB).")
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file.")
+
+    filename = _safe_face_filename(file.filename or "photo.jpg")
+    dest = _face_refs_dir(tenant_id, event_id) / f"{next_id('fimg')}_{filename}"
+    dest.write_bytes(raw)
+    image_path = str(dest.resolve())
+
+    embedding = face_service.embed_reference(image_path)
+    reference = PersonReference(
+        id=next_id("pref"),
+        person_id=person_id,
+        tenant_id=tenant_id,
+        event_id=event_id,
+        image_path=image_path,
+        embedding=embedding,
+        created_at=now_utc(),
+    )
+    PersonReferenceRepository.create(reference)
+    audit_action(tenant_id, event_id, "person_reference_added", {"person_id": person_id, "reference_id": reference.id})
+    return {
+        "reference": {
+            "id": reference.id,
+            "person_id": reference.person_id,
+            "tenant_id": reference.tenant_id,
+            "event_id": reference.event_id,
+            "image_path": reference.image_path,
+            "created_at": reference.created_at.isoformat(),
+        }
+    }
+
+
+@router.get("/events/{event_id}/person-references")
+def list_event_person_references(event_id: str, tenant_id: str) -> dict:
+    """Face reference metadata for the event (no embedding vectors)."""
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    persons = PersonRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+    name_by_id = {p.id: p.display_name for p in persons}
+    refs = PersonReferenceRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
+    items = [
+        {
+            "id": r.id,
+            "person_id": r.person_id,
+            "event_id": r.event_id,
+            "display_name": name_by_id.get(r.person_id, "unknown"),
+            "image_path": r.image_path,
+            "created_at": r.created_at.isoformat(),
+        }
+        for r in refs
+    ]
+    return {"event_id": event_id, "references": items}
+
+
+@router.get("/events/{event_id}/person-references/{reference_id}/image")
+def get_face_reference_image(event_id: str, reference_id: str, tenant_id: str) -> FileResponse:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    ref = PersonReferenceRepository.get(reference_id)
+    if ref is None or ref.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Reference not found.")
+    path = Path(ref.image_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Image file missing on disk.")
+    _assert_path_within_root(path, Path(settings.storage_root))
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
 @router.post("/events/{event_id}/faces/reindex")
 def reindex_event_faces(event_id: str, tenant_id: str) -> dict:
     event = EventRepository.get(event_id)
@@ -481,10 +604,11 @@ def reindex_event_faces(event_id: str, tenant_id: str) -> dict:
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     assets = AssetRepository.list_for_event(event_id)
-    for asset in assets:
-        run_index_job(asset.id)
+    for i, asset in enumerate(assets, start=1):
+        logger.info("Face reindex: processing asset %s (%d/%d)", asset.id, i, len(assets))
+        reindex_face_insights_for_asset(asset.id)
     audit_action(tenant_id, event_id, "face_reindex_triggered", {"asset_count": len(assets)})
-    return {"status": "reindexed", "asset_count": len(assets)}
+    return {"status": "reindexed", "asset_count": len(assets), "mode": "face_insights_only"}
 
 
 @router.get("/events/{event_id}/faces/matches")

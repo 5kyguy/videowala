@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,6 +11,8 @@ from ..repositories import AssetRepository, InsightRepository, RenderRepository,
 from ..schemas import InsightType, PlannerPlan, RenderJob
 from .privacy import audit_action
 from .subtitles import segments_to_srt
+
+logger = logging.getLogger(__name__)
 
 
 class UnsafeRenderCommandError(ValueError):
@@ -191,7 +194,14 @@ def _continuity_order(clip_inputs: list[dict]) -> list[dict]:
     return ordered
 
 
-def _render_from_inputs(clip_inputs: list[dict], output_file: str, duration_seconds: int, scratch_dir: Path) -> None:
+def _render_from_inputs(
+    clip_inputs: list[dict],
+    output_file: str,
+    duration_seconds: int,
+    scratch_dir: Path,
+    *,
+    job_id: str | None = None,
+) -> None:
     if not clip_inputs:
         raise UnsafeRenderCommandError("At least one input file is required for rendering.")
     for item in clip_inputs:
@@ -204,6 +214,7 @@ def _render_from_inputs(clip_inputs: list[dict], output_file: str, duration_seco
     allocated_seconds = _allocate_clip_seconds(duration_seconds, ordered_inputs)
     prepared_clips: list[Path] = []
 
+    n_clips = len(ordered_inputs)
     for index, item in enumerate(ordered_inputs):
         file_path = str(item.get("path", ""))
         source = _resolve_source_path(file_path)
@@ -216,8 +227,13 @@ def _render_from_inputs(clip_inputs: list[dict], output_file: str, duration_seco
             cmd = _prepare_image_clip(str(source), clip_path, seconds_each)
         else:
             cmd = _prepare_video_clip_range(str(source), clip_path, start_s, seconds_each)
+        logger.info("Render %s: encoding clip %d/%d from %s", job_id or "?", index + 1, n_clips, source.name)
         _run_cmd(cmd)
         prepared_clips.append(clip_path)
+        if job_id and n_clips > 0:
+            # 25–65% while preparing per-asset clips (ffmpeg can take minutes on large sources)
+            pct = 25 + int(((index + 1) / n_clips) * 40)
+            RenderRepository.update_status(job_id, "running", progress_percent=min(65, pct))
 
     if not prepared_clips:
         raise UnsafeRenderCommandError("No valid media clips were prepared.")
@@ -250,6 +266,9 @@ def _render_from_inputs(clip_inputs: list[dict], output_file: str, duration_seco
         "+faststart",
         output_file,
     ]
+    if job_id:
+        RenderRepository.update_status(job_id, "running", progress_percent=70)
+    logger.info("Render %s: concatenating %d clip(s)", job_id or "?", len(prepared_clips))
     _run_cmd(concat_cmd)
 
 
@@ -466,6 +485,8 @@ def execute_render_job(job_id: str) -> RenderJob:
     subtitles_enabled = bool(spec.get("subtitles_enabled", False))
     overlays_enabled = bool(spec.get("overlays_enabled", False))
 
+    logger.info("Render job %s: starting (duration=%ss, clips=%d)", job_id, duration_seconds, len(clip_inputs or input_files))
+
     try:
         output = Path(job.output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
@@ -476,6 +497,7 @@ def execute_render_job(job_id: str) -> RenderJob:
             output_file=str(base_output),
             duration_seconds=duration_seconds,
             scratch_dir=scratch_dir,
+            job_id=job_id,
         )
 
         # Stage 2 post-processing: subtitles and OCR overlays are derived from insights.
