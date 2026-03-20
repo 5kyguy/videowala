@@ -49,6 +49,8 @@ export type RenderJob = {
   plan_id: string;
   status: "queued" | "running" | "completed" | "failed";
   output_path: string | null;
+  progress_percent?: number;
+  error_message?: string | null;
   created_at: string;
 };
 
@@ -67,6 +69,11 @@ export type EventSummaryStats = {
   renders_running: number;
   renders_completed: number;
   renders_failed: number;
+  index_jobs_total: number;
+  index_jobs_queued: number;
+  index_jobs_running: number;
+  index_jobs_completed: number;
+  index_jobs_failed: number;
 };
 
 export type EventSummary = {

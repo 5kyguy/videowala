@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
@@ -9,10 +10,39 @@ from ..schemas import IndexJob
 from ..services.indexing import index_asset
 from ..services.rendering import execute_render_job
 
+logger = logging.getLogger(__name__)
+
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="videowala-worker")
 _LOCK = Lock()
 _INFLIGHT_INDEX: dict[str, str] = {}
 _INFLIGHT_RENDER: set[str] = set()
+_LAST_INDEX_LOG_MILESTONE: dict[str, int] = {}
+
+
+def _emit_indexing_progress_log(event_id: str) -> None:
+    """Aggregate indexing progress (25% milestones), not per-asset lines."""
+    counts = IndexJobRepository.count_by_status_for_event(event_id)
+    total = sum(counts.values())
+    if total == 0:
+        return
+    done = counts["completed"] + counts["failed"]
+    pct = (done * 100) // total
+    milestone = max((m for m in (25, 50, 75, 100) if pct >= m), default=0)
+    prev = _LAST_INDEX_LOG_MILESTONE.get(event_id, 0)
+    if milestone <= prev:
+        return
+    _LAST_INDEX_LOG_MILESTONE[event_id] = milestone
+    if milestone == 100:
+        _LAST_INDEX_LOG_MILESTONE.pop(event_id, None)
+    logger.info(
+        "Indexing progress event_id=%s: %d/%d jobs finished (%d queued, %d running, %d failed)",
+        event_id,
+        done,
+        total,
+        counts["queued"],
+        counts["running"],
+        counts["failed"],
+    )
 
 
 def run_index_job(asset_id: str) -> int:
@@ -51,8 +81,10 @@ def submit_index_job(asset_id: str) -> IndexJob:
                 IndexJobRepository.set_progress(job.id, 30)
                 count = run_index_job(asset.id)
                 IndexJobRepository.mark_completed(job.id, count)
+                _emit_indexing_progress_log(asset.event_id)
             except Exception as exc:  # noqa: BLE001
                 IndexJobRepository.mark_failed(job.id, str(exc))
+                _emit_indexing_progress_log(asset.event_id)
             finally:
                 with _LOCK:
                     if _INFLIGHT_INDEX.get(asset.id) == job.id:

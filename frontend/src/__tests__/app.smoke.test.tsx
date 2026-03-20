@@ -10,6 +10,8 @@ describe("App", () => {
     expect(screen.getByText("Profiles")).toBeInTheDocument();
     expect(screen.getByText("Events")).toBeInTheDocument();
     expect(screen.getByText("Event Summary")).toBeInTheDocument();
+    expect(screen.getByText("Ingest media")).toBeInTheDocument();
+    expect(screen.getByText("Plan + render")).toBeInTheDocument();
     expect(screen.getByText("Render Jobs")).toBeInTheDocument();
   });
 });

@@ -588,6 +588,18 @@ class IndexJobRepository:
         ]
 
     @staticmethod
+    def count_by_status_for_event(event_id: str) -> dict[str, int]:
+        counts = {"queued": 0, "running": 0, "completed": 0, "failed": 0}
+        with db_cursor() as cur:
+            rows = cur.execute(
+                "SELECT status, COUNT(*) AS c FROM index_jobs WHERE event_id = ? GROUP BY status",
+                (event_id,),
+            ).fetchall()
+        for row in rows:
+            counts[row["status"]] = int(row["c"])
+        return counts
+
+    @staticmethod
     def mark_running(job_id: str) -> None:
         with db_cursor() as cur:
             cur.execute(

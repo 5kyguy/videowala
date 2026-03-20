@@ -214,6 +214,11 @@ class EventSummaryStats(BaseModel):
     renders_running: int
     renders_completed: int
     renders_failed: int
+    index_jobs_total: int
+    index_jobs_queued: int
+    index_jobs_running: int
+    index_jobs_completed: int
+    index_jobs_failed: int
 
 
 class EventSummary(BaseModel):

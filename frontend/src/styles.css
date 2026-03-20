@@ -63,6 +63,63 @@ body {
   gap: 8px;
 }
 
+.workflow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+  align-items: end;
+  margin-top: 10px;
+}
+
+.workflow-grid .span-2 {
+  grid-column: span 2;
+}
+
+@media (max-width: 700px) {
+  .workflow-grid .span-2 {
+    grid-column: span 1;
+  }
+}
+
+.checkbox-inline {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.pipeline-note {
+  margin: 10px 0 0;
+  font-size: 13px;
+  color: #cbd5e1;
+}
+
+.plan-details {
+  margin-top: 12px;
+}
+
+.plan-details summary {
+  cursor: pointer;
+  color: #94a3b8;
+  margin-bottom: 8px;
+}
+
+.plan-details pre {
+  background: #020617;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+  max-height: 240px;
+  font-size: 12px;
+}
+
 label {
   display: flex;
   flex-direction: column;

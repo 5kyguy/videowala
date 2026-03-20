@@ -54,7 +54,12 @@ describe("api client", () => {
             renders_queued: 0,
             renders_running: 0,
             renders_completed: 0,
-            renders_failed: 0
+            renders_failed: 0,
+            index_jobs_total: 0,
+            index_jobs_queued: 0,
+            index_jobs_running: 0,
+            index_jobs_completed: 0,
+            index_jobs_failed: 0
           }
         })
     }));

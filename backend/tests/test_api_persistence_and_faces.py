@@ -108,6 +108,8 @@ def test_event_summary_reports_dashboard_stats() -> None:
     assert body["stats"]["persons_total"] == 1
     assert body["stats"]["faces_saved"] is True
     assert body["stats"]["renders_total"] == 0
+    assert body["stats"]["index_jobs_total"] >= 1
+    assert body["stats"]["index_jobs_queued"] + body["stats"]["index_jobs_running"] + body["stats"]["index_jobs_completed"] + body["stats"]["index_jobs_failed"] == body["stats"]["index_jobs_total"]
 
 
 def test_event_summary_and_render_list_reject_cross_tenant_access() -> None:

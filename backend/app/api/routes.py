@@ -217,6 +217,9 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
         "failed": sum(1 for job in renders if job.status == "failed"),
     }
 
+    index_by_status = IndexJobRepository.count_by_status_for_event(event_id)
+    index_jobs_total = sum(index_by_status.values())
+
     return EventSummary(
         event=event,
         stats=EventSummaryStats(
@@ -234,6 +237,11 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
             renders_running=renders_by_status["running"],
             renders_completed=renders_by_status["completed"],
             renders_failed=renders_by_status["failed"],
+            index_jobs_total=index_jobs_total,
+            index_jobs_queued=index_by_status["queued"],
+            index_jobs_running=index_by_status["running"],
+            index_jobs_completed=index_by_status["completed"],
+            index_jobs_failed=index_by_status["failed"],
         ),
     )
 

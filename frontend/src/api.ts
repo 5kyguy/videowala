@@ -70,6 +70,7 @@ export function createApiClient(config: ApiClientConfig) {
       request<{
         batch: true;
         count: number;
+        failed?: number;
         assets: Array<{ asset_id: string; media_path: string; media_type: string; insights_generated: number }>;
       }>(baseUrl, "/assets", {
         method: "POST",
