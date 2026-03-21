@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 
-# Quiet third-party noise during model inference (EasyOCR / requests).
+# Quiet third-party noise during model inference (PaddleOCR / requests).
 warnings.filterwarnings(
     "ignore",
     message=".*pin_memory.*",

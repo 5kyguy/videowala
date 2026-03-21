@@ -5,22 +5,24 @@ import hashlib
 from ..db import now_utc
 from ..repositories import (
     AssetRepository,
+    EventRepository,
     InsightRepository,
     PersonReferenceRepository,
     PersonRepository,
     SegmentRepository,
     next_id,
 )
-from ..config import settings
+from ..config import settings, ocr_trigger_tags_set
 from ..schemas import Asset, AssetInsight, AssetSegment, InsightType
 from ..vector_store import upsert_asset_vector
 from .asr import asr_service
-from .embeddings import embedding_service
+from .embeddings import build_embedding_text, embedding_service
 from .faces import face_service
 from .ingest import ensure_asset_proxy
 from .ocr import ocr_service
 from .privacy import audit_action
 from .vlm import vlm_service
+
 
 def _face_detections_and_matches(asset: Asset, analysis_media_path: str) -> tuple[list[dict], list[dict]]:
     """Single detection pass on the same path used for VLM/OCR (proxy for video), then match against event references."""
@@ -60,7 +62,19 @@ def _segment_for_asset(asset: Asset, duration_s: float) -> list[tuple[float, flo
     return out[:40]
 
 
-def _base_cull_score(asset: Asset, manifest: dict, detections: list[dict], asr_segments: list[dict], ocr_items: list[dict]) -> float:
+def _base_cull_score(
+    asset: Asset,
+    manifest: dict,
+    asr_segments: list[dict],
+    ocr_items: list[dict],
+    *,
+    caption_confidence: float | None,
+    vlm_tags: list[str],
+) -> float:
+    """
+    PoC cull score: resolution, audio, ASR/OCR signals, VLM confidence and negative tags.
+    No bonus for face detections or person matches (per product spec).
+    """
     score = 0.45
     width = int(manifest.get("width", 0) or 0)
     height = int(manifest.get("height", 0) or 0)
@@ -68,14 +82,18 @@ def _base_cull_score(asset: Asset, manifest: dict, detections: list[dict], asr_s
         score += 0.1
     if bool(manifest.get("has_audio")):
         score += 0.05
-    if detections:
-        score += 0.1
     if asr_segments:
         score += 0.1
     if ocr_items:
         score += 0.05
     if asset.media_type == "image":
         score -= 0.03
+    if caption_confidence is not None:
+        score += 0.05 * max(0.0, min(1.0, caption_confidence))
+    neg = {"blur", "blurry", "dark", "underexposed", "noisy", "noise"}
+    tag_low = {t.lower() for t in vlm_tags}
+    if neg & tag_low:
+        score -= 0.08
     return max(0.0, min(1.0, round(score, 4)))
 
 
@@ -84,11 +102,29 @@ def _segment_signature(asset: Asset, start_s: float, end_s: float) -> str:
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:12]
 
 
+def _should_run_ocr(vlm_tags: list[str]) -> bool:
+    triggers = ocr_trigger_tags_set()
+    lowered = {t.strip().lower() for t in vlm_tags if t.strip()}
+    return bool(lowered & triggers)
+
+
+def _people_names_from_matches(matches: list[dict]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for m in matches:
+        n = str(m.get("name") or "").strip()
+        if n and n.lower() not in seen and n != "unknown":
+            seen.add(n.lower())
+            names.append(n)
+    return names
+
+
 def index_asset(asset_id: str) -> list[AssetInsight]:
     asset = AssetRepository.get(asset_id)
     if asset is None:
         raise KeyError(f"Asset not found: {asset_id}")
-    # Reindex clears only mutable machine-generated fields for this asset.
+    event = EventRepository.get(asset.event_id)
+
     InsightRepository.delete_for_asset(
         event_id=asset.event_id,
         asset_id=asset.id,
@@ -98,6 +134,9 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             InsightType.face_detections.value,
             InsightType.face_matches.value,
             InsightType.cull_metrics.value,
+            InsightType.ocr_text.value,
+            InsightType.asr_transcript.value,
+            InsightType.semantic_embedding.value,
         ],
     )
 
@@ -106,21 +145,47 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
 
     detections, matches = _face_detections_and_matches(asset, analysis_media_path)
 
-    ocr_items, ocr_model = ocr_service.extract(analysis_media_path)
-
     asr_segments = asr_service.transcribe(analysis_media_path) if asset.media_type == "video" else []
-
-    ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
     asr_text_joined = " ".join([seg.get("text", "") for seg in asr_segments]).strip()
+
+    event_ctx = None
+    predefined: list[str] = []
+    ocr_langs: list[str] = ["en"]
+    if event is not None:
+        event_ctx = {
+            "title": event.title,
+            "event_type": event.event_type,
+            "venue": event.venue,
+            "date": event.date,
+        }
+        predefined = list(event.predefined_tags)
+        ocr_langs = list(event.ocr_languages) if event.ocr_languages else ["en"]
 
     vlm = vlm_service.caption_and_tags(
         media_path=analysis_media_path,
         media_type=asset.media_type,
         scratch_root=settings.scratch_root,
+        event_context=event_ctx,
+        predefined_tags=predefined,
     )
 
+    run_ocr = _should_run_ocr(vlm.tags)
+    ocr_items, ocr_model = ocr_service.extract(
+        analysis_media_path,
+        run_ocr=run_ocr,
+        ocr_languages=ocr_langs,
+    )
+    ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
+
     duration_s = float(proxy.manifest.get("duration_s", 0.0) or 0.0)
-    base_score = _base_cull_score(asset, proxy.manifest, detections, asr_segments, ocr_items)
+    base_score = _base_cull_score(
+        asset,
+        proxy.manifest,
+        asr_segments,
+        ocr_items,
+        caption_confidence=vlm.caption_confidence,
+        vlm_tags=vlm.tags,
+    )
     segments = [
         AssetSegment(
             id=next_id("seg"),
@@ -146,8 +211,12 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.vlm_caption,
-            payload={"text": vlm.caption, "model": vlm.model},
-            confidence=0.65,
+            payload={
+                "text": vlm.caption,
+                "model": vlm.model,
+                "caption_confidence": vlm.caption_confidence,
+            },
+            confidence=float(vlm.caption_confidence) if vlm.caption_confidence is not None else 0.65,
             created_at=now_utc(),
         ),
         AssetInsight(
@@ -156,7 +225,12 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.vlm_tags,
-            payload={"tags": vlm.tags, "model": vlm.model},
+            payload={
+                "tags": vlm.tags,
+                "tags_from_predefined": vlm.tags_from_predefined,
+                "tags_added": vlm.tags_added,
+                "model": vlm.model,
+            },
             confidence=0.62,
             created_at=now_utc(),
         ),
@@ -210,7 +284,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             event_id=asset.event_id,
             asset_id=asset.id,
             insight_type=InsightType.ocr_text,
-            payload={"items": ocr_items, "model": ocr_model},
+            payload={"items": ocr_items, "model": ocr_model, "skipped": not run_ocr},
             confidence=0.6 if ocr_items else 0.0,
             created_at=now_utc(),
         )
@@ -229,8 +303,16 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
         )
     )
 
-    combined = "\n".join([vlm.caption, asr_text_joined, ocr_text_joined]).strip()
+    people_names = _people_names_from_matches(matches)
+    combined = build_embedding_text(
+        caption=vlm.caption,
+        tags=vlm.tags,
+        people_names=people_names,
+        asr=asr_text_joined,
+        ocr=ocr_text_joined,
+    )
     embed = embedding_service.embed_text(combined)
+    text_source_limit = 8000
     try:
         row_id = upsert_asset_vector(
             tenant_id=asset.tenant_id,
@@ -238,7 +320,7 @@ def index_asset(asset_id: str) -> list[AssetInsight]:
             asset_id=asset.id,
             kind="multi",
             vector=embed.vector,
-            text_source=combined[:2000] if combined else None,
+            text_source=combined[:text_source_limit] if combined else None,
         )
         enabled = True
     except Exception:

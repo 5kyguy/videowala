@@ -54,16 +54,20 @@ class Settings(BaseModel):
     # Stage 2 vector store (pgvector)
     pg_dsn: str = Field(default_factory=lambda: os.getenv("PG_DSN", "postgresql://videowala:videowala@localhost:5432/videowala"))
     stage2_stub_models: bool = Field(default_factory=lambda: _parse_bool(os.getenv("DEV_MODE"), False))
-    embedding_model_id: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL_ID", "sentence-transformers/all-MiniLM-L6-v2"))
+    embedding_model_id: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL_ID", "BAAI/bge-m3"))
+    # Must match the dense output dimension of `embedding_model_id` (BGE-M3 → 1024).
+    embedding_vector_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_VECTOR_DIM", "1024")))
     vlm_model_id: str = Field(default_factory=lambda: os.getenv("VLM_MODEL_ID", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"))
-    # OCR: "easyocr" (default, PyTorch GPU if available — ROCm exposes this as CUDA) or "paddle" (PaddleOCR + EasyOCR fallback).
-    ocr_engine: str = Field(
-        default_factory=lambda: "paddle"
-        if os.getenv("OCR_ENGINE", "easyocr").strip().lower() == "paddle"
-        else "easyocr"
+    # Lowercase tag names: if any VLM tag matches, OCR runs (after VLM). Comma-separated.
+    ocr_trigger_tags: str = Field(
+        default_factory=lambda: os.getenv("OCR_TRIGGER_TAGS", "text,signage,document,readable_text")
     )
     # tqdm progress for indexing (per-asset steps + batch file loop) when True.
     indexing_show_progress: bool = Field(default_factory=_default_indexing_progress)
 
 
 settings = Settings()
+
+
+def ocr_trigger_tags_set() -> set[str]:
+    return {t.strip().lower() for t in settings.ocr_trigger_tags.split(",") if t.strip()}

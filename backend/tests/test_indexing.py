@@ -21,6 +21,8 @@ def _create_event() -> Event:
         tenant_id=payload.tenant_id,
         title=payload.title,
         event_type=payload.event_type,
+        predefined_tags=[],
+        ocr_languages=["en"],
         created_at=now_utc(),
     )
     EventRepository.create(event)

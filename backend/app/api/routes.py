@@ -28,6 +28,7 @@ from ..schemas import (
     EventCreate,
     EventSummary,
     EventSummaryStats,
+    EventUpdate,
     FeedbackUpdate,
     Person,
     PersonCreate,
@@ -86,11 +87,32 @@ def create_event(payload: EventCreate) -> Event:
         event_type=payload.event_type,
         venue=payload.venue,
         date=payload.date,
+        predefined_tags=list(payload.predefined_tags),
+        ocr_languages=list(payload.ocr_languages) if payload.ocr_languages else ["en"],
         created_at=now_utc(),
     )
     EventRepository.create(event)
     audit_action(event.tenant_id, event.id, "event_created", {"title": event.title})
     return event
+
+
+@router.patch("/events/{event_id}", response_model=Event)
+def patch_event(event_id: str, payload: EventUpdate, tenant_id: str) -> Event:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    patch = payload.model_dump(exclude_unset=True)
+    if not patch:
+        return event
+    updated = EventRepository.update(event_id, patch)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    audit_action(tenant_id, event_id, "event_updated", patch)
+    return updated
 
 
 @router.get("/events")

@@ -8,6 +8,8 @@ export type Event = {
   event_type: string;
   venue?: string | null;
   date?: string | null;
+  predefined_tags?: string[];
+  ocr_languages?: string[];
   created_at: string;
 };
 

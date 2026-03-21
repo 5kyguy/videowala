@@ -6,6 +6,8 @@ from typing import Any
 
 from ..config import settings
 
+VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
+
 
 def _deterministic_vector(seed: str, size: int = 8) -> list[float]:
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
@@ -24,6 +26,19 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     if norm_a == 0 or norm_b == 0:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _first_video_frame_bgr(video_path: Path):
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(str(video_path))
+    try:
+        ok, frame = cap.read()
+        return frame if ok else None
+    finally:
+        cap.release()
 
 
 class FaceService:
@@ -47,25 +62,78 @@ class FaceService:
         target = Path(image_path)
         if not target.exists():
             return _deterministic_vector(f"media:{image_path}")
-        # Real extraction is optional. For now, fallback stays deterministic so tests are stable.
-        return _deterministic_vector(f"media:{target.resolve()}")
+        if self._face_analyzer is None:
+            return _deterministic_vector(f"media:{target.resolve()}")
+        try:
+            import cv2
+        except ImportError:
+            return _deterministic_vector(f"media:{target.resolve()}")
+        img = cv2.imread(str(target))
+        if img is None:
+            return _deterministic_vector(f"media:{target.resolve()}")
+        faces = self._face_analyzer.get(img)
+        if not faces:
+            return _deterministic_vector(f"media:{target.resolve()}")
+        return faces[0].normed_embedding.tolist()
 
     def detect_faces(self, media_path: str) -> list[dict]:
         target = Path(media_path)
         if not target.exists():
             return []
-        confidence = 0.7 if target.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else 0.55
-        embedding = _deterministic_vector(f"media:{target.resolve()}")
-        return [
-            {
-                "bbox": [0.1, 0.1, 0.6, 0.6],
-                "confidence": confidence,
-                "embedding": embedding,
-                "time_range": [0, 5],
-            }
-        ]
+        if self._face_analyzer is None:
+            confidence = 0.7 if target.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else 0.55
+            embedding = _deterministic_vector(f"media:{target.resolve()}")
+            return [
+                {
+                    "bbox": [0.1, 0.1, 0.6, 0.6],
+                    "confidence": confidence,
+                    "embedding": embedding,
+                    "time_range": [0, 5],
+                }
+            ]
 
-    def match_faces(self, detections: list[dict], reference_embeddings: list[dict], threshold: float = 0.72) -> list[dict]:
+        try:
+            import cv2
+        except ImportError:
+            embedding = _deterministic_vector(f"media:{target.resolve()}")
+            return [
+                {
+                    "bbox": [0.1, 0.1, 0.6, 0.6],
+                    "confidence": 0.55,
+                    "embedding": embedding,
+                    "time_range": [0, 5],
+                }
+            ]
+
+        if target.suffix.lower() in VIDEO_EXTS:
+            frame = _first_video_frame_bgr(target)
+            if frame is None:
+                return []
+            img = frame
+            tr = [0.0, 5.0]
+        else:
+            img = cv2.imread(str(target))
+            if img is None:
+                return []
+            tr = [0.0, 0.0]
+
+        faces = self._face_analyzer.get(img)
+        out: list[dict] = []
+        for det in faces:
+            bbox = det.bbox.astype(float).tolist() if hasattr(det, "bbox") else [0.0, 0.0, 0.0, 0.0]
+            score = float(getattr(det, "det_score", 0.0) or 0.0)
+            emb = det.normed_embedding.tolist() if hasattr(det, "normed_embedding") else []
+            out.append(
+                {
+                    "bbox": bbox,
+                    "confidence": score,
+                    "embedding": emb,
+                    "time_range": tr,
+                }
+            )
+        return out
+
+    def match_faces(self, detections: list[dict], reference_embeddings: list[dict], threshold: float = 0.8) -> list[dict]:
         matches: list[dict] = []
         for detection in detections:
             emb = detection.get("embedding", [])

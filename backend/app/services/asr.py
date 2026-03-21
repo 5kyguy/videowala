@@ -90,7 +90,11 @@ class AsrService:
         if not self._extract_audio(target, wav):
             return []
         try:
-            segments, _info = self._model.transcribe(str(wav))
+            # language=None: auto-detect (English, Hindi, Gujarati, etc.) per clip.
+            segments, info = self._model.transcribe(str(wav), language=None, task="transcribe")
+            lang = getattr(info, "language", None)
+            if lang:
+                logger.info("Whisper detected language=%s for %s", lang, target.name)
             out = []
             for seg in segments:
                 out.append({"start": float(seg.start), "end": float(seg.end), "text": seg.text.strip(), "confidence": 0.6})

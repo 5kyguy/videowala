@@ -235,6 +235,16 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 5")
 
+        if version < 6:
+            # Indexing quality: predefined VLM tag vocabulary + Paddle OCR language hints per event.
+            cur.executescript(
+                """
+                ALTER TABLE events ADD COLUMN predefined_tags_json TEXT NOT NULL DEFAULT '[]';
+                ALTER TABLE events ADD COLUMN ocr_languages_json TEXT NOT NULL DEFAULT '["en"]';
+                """
+            )
+            cur.execute("PRAGMA user_version = 6")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)

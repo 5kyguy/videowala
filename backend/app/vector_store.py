@@ -33,18 +33,41 @@ def _connect() -> Any:
 
 def migrate_pgvector() -> None:
     conn = _connect()
+    dim = int(settings.embedding_vector_dim)
     try:
         with conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
             cur.execute(
                 """
+                CREATE TABLE IF NOT EXISTS videowala_pg_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute("SELECT value FROM videowala_pg_meta WHERE key = 'embedding_vector_dim'")
+            row = cur.fetchone()
+            stored = int(row[0]) if row and str(row[0]).isdigit() else None
+            if stored != dim:
+                cur.execute("DROP INDEX IF EXISTS idx_asset_vectors_vector")
+                cur.execute("DROP TABLE IF EXISTS asset_vectors CASCADE")
+            cur.execute(
+                """
+                INSERT INTO videowala_pg_meta (key, value)
+                VALUES ('embedding_vector_dim', %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+                """,
+                (str(dim),),
+            )
+            cur.execute(
+                f"""
                 CREATE TABLE IF NOT EXISTS asset_vectors (
                     id BIGSERIAL PRIMARY KEY,
                     tenant_id TEXT NOT NULL,
                     event_id TEXT NOT NULL,
                     asset_id TEXT NOT NULL,
                     kind TEXT NOT NULL,
-                    vector vector(384) NOT NULL,
+                    vector vector({dim}) NOT NULL,
                     text_source TEXT,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
                     UNIQUE(tenant_id, event_id, asset_id, kind)
@@ -53,7 +76,9 @@ def migrate_pgvector() -> None:
             )
             cur.execute("CREATE INDEX IF NOT EXISTS idx_asset_vectors_event ON asset_vectors(tenant_id, event_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_asset_vectors_kind ON asset_vectors(kind)")
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_asset_vectors_vector ON asset_vectors USING ivfflat (vector vector_cosine_ops)")
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_asset_vectors_vector ON asset_vectors USING ivfflat (vector vector_cosine_ops)"
+            )
         conn.commit()
     finally:
         conn.close()

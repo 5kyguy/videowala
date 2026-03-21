@@ -31,6 +31,11 @@ class EventCreate(BaseModel):
     event_type: str
     venue: str | None = None
     date: str | None = None
+    predefined_tags: list[str] = Field(default_factory=list)
+    ocr_languages: list[str] = Field(
+        default_factory=lambda: ["en"],
+        description="BCP-47 style hints for PaddleOCR (e.g. en, hi, gu).",
+    )
 
 
 class Event(BaseModel):
@@ -40,7 +45,20 @@ class Event(BaseModel):
     event_type: str
     venue: str | None = None
     date: str | None = None
+    predefined_tags: list[str] = Field(default_factory=list)
+    ocr_languages: list[str] = Field(default_factory=lambda: ["en"])
     created_at: datetime
+
+
+class EventUpdate(BaseModel):
+    """Partial update for event metadata used by indexing (PoC)."""
+
+    title: str | None = None
+    event_type: str | None = None
+    venue: str | None = None
+    date: str | None = None
+    predefined_tags: list[str] | None = None
+    ocr_languages: list[str] | None = None
 
 
 class AssetRegister(BaseModel):

@@ -6,9 +6,9 @@ Base URL: `http://localhost:8000`
 
 All endpoints are **tenant-scoped** by `tenant_id` and (where relevant) `event_id`.
 
-**OCR:** set `OCR_ENGINE=easyocr` (default) for EasyOCR + PyTorch — uses **GPU when `torch.cuda.is_available()`** (NVIDIA CUDA or AMD ROCm builds). Use `OCR_ENGINE=paddle` only if PaddleOCR works on your machine (slow cold start; static inference can fail with `std::exception` on some setups).
+**OCR:** indexing uses **PaddleOCR** only. OCR runs **after** the VLM step when any VLM tag intersects `OCR_TRIGGER_TAGS` (see `backend/app/config.py`). Event fields `predefined_tags`, `ocr_languages`, and `PATCH /events/{event_id}` control vocabulary and Paddle language codes.
 
-**Indexing progress:** when stderr is a TTY, `tqdm` shows a **per-asset** bar (purge → faces → OCR → ASR → VLM) and a **batch** bar over files. Set `INDEXING_PROGRESS=0` to disable, or `INDEXING_PROGRESS=1` to force on (e.g. piped logs).
+**Indexing progress:** when stderr is a TTY, `tqdm` shows a **per-asset** bar (faces → ASR → VLM → gated OCR) and a **batch** bar over files. Set `INDEXING_PROGRESS=0` to disable, or `INDEXING_PROGRESS=1` to force on (e.g. piped logs).
 
 ## Health
 
@@ -19,6 +19,7 @@ Returns `{"status": "ok"}`.
 ## Events
 
 - `POST /events`
+- `PATCH /events/{event_id}?tenant_id=...` — update title, `predefined_tags`, `ocr_languages`, etc.
 - `GET /events?tenant_id=...`
 - `GET /events/{event_id}/summary?tenant_id=...`
 - `GET /events/{event_id}/renders?tenant_id=...`

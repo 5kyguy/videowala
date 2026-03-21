@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from uuid import uuid4
 
 from .db import db_cursor, decode_json, encode_json, from_iso, now_utc, to_iso
@@ -22,14 +23,45 @@ def next_id(prefix: str) -> str:
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
+def _event_row_to_model(row: sqlite3.Row) -> Event:
+    tags_raw = row["predefined_tags_json"] if "predefined_tags_json" in row.keys() else "[]"
+    langs_raw = row["ocr_languages_json"] if "ocr_languages_json" in row.keys() else '["en"]'
+    try:
+        predefined_tags = list(decode_json(tags_raw)) if tags_raw else []
+    except Exception:
+        predefined_tags = []
+    try:
+        ocr_languages = list(decode_json(langs_raw)) if langs_raw else ["en"]
+    except Exception:
+        ocr_languages = ["en"]
+    if not isinstance(predefined_tags, list):
+        predefined_tags = []
+    if not isinstance(ocr_languages, list) or not ocr_languages:
+        ocr_languages = ["en"]
+    return Event(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        title=row["title"],
+        event_type=row["event_type"],
+        venue=row["venue"],
+        date=row["date"],
+        predefined_tags=[str(x) for x in predefined_tags],
+        ocr_languages=[str(x) for x in ocr_languages],
+        created_at=from_iso(row["created_at"]),
+    )
+
+
 class EventRepository:
     @staticmethod
     def create(event: Event) -> Event:
         with db_cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO events (id, tenant_id, title, event_type, venue, date, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO events (
+                    id, tenant_id, title, event_type, venue, date,
+                    predefined_tags_json, ocr_languages_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
@@ -38,6 +70,8 @@ class EventRepository:
                     event.event_type,
                     event.venue,
                     event.date,
+                    encode_json(event.predefined_tags),
+                    encode_json(event.ocr_languages),
                     to_iso(event.created_at),
                 ),
             )
@@ -49,15 +83,7 @@ class EventRepository:
             row = cur.execute("SELECT * FROM events WHERE id = ?", (event_id,)).fetchone()
         if row is None:
             return None
-        return Event(
-            id=row["id"],
-            tenant_id=row["tenant_id"],
-            title=row["title"],
-            event_type=row["event_type"],
-            venue=row["venue"],
-            date=row["date"],
-            created_at=from_iso(row["created_at"]),
-        )
+        return _event_row_to_model(row)
 
     @staticmethod
     def list_for_tenant(tenant_id: str) -> list[Event]:
@@ -66,18 +92,43 @@ class EventRepository:
                 "SELECT * FROM events WHERE tenant_id = ? ORDER BY created_at DESC",
                 (tenant_id,),
             ).fetchall()
-        return [
-            Event(
-                id=row["id"],
-                tenant_id=row["tenant_id"],
-                title=row["title"],
-                event_type=row["event_type"],
-                venue=row["venue"],
-                date=row["date"],
-                created_at=from_iso(row["created_at"]),
+        return [_event_row_to_model(row) for row in rows]
+
+    @staticmethod
+    def update(event_id: str, patch: dict) -> Event | None:
+        """Merge `patch` into the event (keys omitted keep existing values)."""
+        existing = EventRepository.get(event_id)
+        if existing is None:
+            return None
+        title = patch.get("title", existing.title)
+        event_type = patch.get("event_type", existing.event_type)
+        venue = patch.get("venue", existing.venue)
+        date = patch.get("date", existing.date)
+        predefined_tags = patch.get("predefined_tags", existing.predefined_tags)
+        ocr_languages = patch.get("ocr_languages", existing.ocr_languages)
+        if not isinstance(predefined_tags, list):
+            predefined_tags = existing.predefined_tags
+        if not isinstance(ocr_languages, list) or not ocr_languages:
+            ocr_languages = existing.ocr_languages
+        with db_cursor() as cur:
+            cur.execute(
+                """
+                UPDATE events SET
+                    title = ?, event_type = ?, venue = ?, date = ?,
+                    predefined_tags_json = ?, ocr_languages_json = ?
+                WHERE id = ?
+                """,
+                (
+                    title,
+                    event_type,
+                    venue,
+                    date,
+                    encode_json(predefined_tags),
+                    encode_json(ocr_languages),
+                    event_id,
+                ),
             )
-            for row in rows
-        ]
+        return EventRepository.get(event_id)
 
 
 class AssetRepository:

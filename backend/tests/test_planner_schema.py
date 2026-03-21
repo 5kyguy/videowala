@@ -19,6 +19,8 @@ def _ensure_event(event_id: str = "event_a", tenant_id: str = "tenant_a") -> Non
             tenant_id=tenant_id,
             title="Test Event",
             event_type="test",
+            predefined_tags=[],
+            ocr_languages=["en"],
             created_at=now_utc(),
         )
     )

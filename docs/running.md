@@ -42,8 +42,10 @@ Key settings (see `backend/app/config.py`):
   - `PG_DSN` → Postgres DSN for pgvector-backed semantic search
 - **Models (real mode, GPU preferred)**:
   - `VLM_MODEL_ID` → multimodal model (`HuggingFaceTB/SmolVLM2-2.2B-Instruct` by default)
-  - `EMBEDDING_MODEL_ID` → text embedding model (`sentence-transformers/all-MiniLM-L6-v2` by default)
-  - `OCR_ENGINE` → `"easyocr"` (default; uses GPU when available) or `"paddle"` (PaddleOCR with EasyOCR fallback)
+  - `EMBEDDING_MODEL_ID` → text embedding model (`BAAI/bge-m3` by default; must match `EMBEDDING_VECTOR_DIM`, usually `1024`)
+  - `EMBEDDING_VECTOR_DIM` → pgvector column size (defaults to `1024` for BGE-M3; changing model may require Postgres `asset_vectors` rebuild — see startup migration)
+  - `OCR_TRIGGER_TAGS` → comma-separated VLM tag names that trigger Paddle OCR after captioning (e.g. `text,signage,document,readable_text`)
+- **OCR** uses **PaddleOCR** only; per-event `ocr_languages` on the event record selects the Paddle `lang` code (e.g. `en`, `hi`, `gu`).
 - **Indexing UX**:
   - `INDEXING_PROGRESS` → `0` / `1` to force-disable/force-enable tqdm progress bars
 

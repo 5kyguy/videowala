@@ -53,6 +53,8 @@ def test_render_job_execution_completes() -> None:
             tenant_id="tenant_a",
             title="Render Test",
             event_type="test",
+            predefined_tags=[],
+            ocr_languages=["en"],
             created_at=now_utc(),
         )
     )
