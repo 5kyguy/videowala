@@ -13,6 +13,9 @@ class OutputType(str, Enum):
     person_focus_reel = "person_focus_reel"
 
 
+VideoOrientation = Literal["landscape", "portrait"]
+
+
 class InsightType(str, Enum):
     vlm_caption = "vlm_caption"
     vlm_tags = "vlm_tags"
@@ -148,8 +151,10 @@ class ContentRequestCreate(BaseModel):
     include_asset_ids: list[str] = Field(default_factory=list)
     excluded_asset_ids: list[str] = Field(default_factory=list)
     include_media_types: list[Literal["image", "video"]] = Field(default_factory=list)
-    render_subtitles: bool = Field(default=False, description="Burn ASR subtitles into the video.")
-    render_overlays: bool = Field(default=False, description="Draw OCR overlays on top of the video.")
+    video_orientation: VideoOrientation = Field(
+        default="landscape",
+        description="Output framing: landscape (16:9 crop) or portrait / reels (9:16 crop). No resolution or fps targets.",
+    )
 
 
 class PlannerAction(BaseModel):
@@ -159,8 +164,6 @@ class PlannerAction(BaseModel):
         "set_duration",
         "render_preview",
         "exclude_segments",
-        "render_subtitles",
-        "render_overlays",
     ]
     params: dict = Field(default_factory=dict)
 
@@ -190,6 +193,10 @@ class RenderJob(BaseModel):
     progress_percent: int = 0
     error_message: str | None = None
     created_at: datetime
+    planner_prompt: str | None = Field(
+        default=None,
+        description="User prompt from the content request used to build the plan for this render.",
+    )
 
 
 class IndexJob(BaseModel):
@@ -213,8 +220,10 @@ class FeedbackUpdate(BaseModel):
     include_asset_ids: list[str] = Field(default_factory=list)
     exclude_asset_ids: list[str] = Field(default_factory=list)
     include_media_types: list[Literal["image", "video"]] = Field(default_factory=list)
-    render_subtitles: bool = Field(default=False, description="Burn ASR subtitles into the video.")
-    render_overlays: bool = Field(default=False, description="Draw OCR overlays on top of the video.")
+    video_orientation: VideoOrientation = Field(
+        default="landscape",
+        description="Output framing: landscape (16:9 crop) or portrait / reels (9:16 crop).",
+    )
 
 
 class EventSummaryStats(BaseModel):

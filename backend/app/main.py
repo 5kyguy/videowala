@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import warnings
+import logging
 
 # Quiet third-party noise during model inference (PaddleOCR / requests).
 warnings.filterwarnings(
@@ -27,9 +28,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .config import settings
 from .db import migrate
+from .repositories import RenderRepository
 from .vector_store import migrate_pgvector
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
+logger = logging.getLogger(__name__)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,6 +48,11 @@ app.include_router(router)
 @app.on_event("startup")
 def startup() -> None:
     migrate()
+    recovered = RenderRepository.mark_incomplete_jobs_failed(
+        "Render interrupted by backend restart/reload. Please retry."
+    )
+    if recovered:
+        logger.warning("Marked %d stale render job(s) as failed on startup.", recovered)
     try:
         migrate_pgvector()
     except Exception:

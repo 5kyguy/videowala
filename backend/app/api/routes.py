@@ -330,7 +330,12 @@ def create_render(payload: ContentRequestCreate) -> dict:
     context = get_event_context(payload.event_id)
     plan = build_plan(payload, context)
     try:
-        job = create_render_job(tenant_id=payload.tenant_id, event_id=payload.event_id, plan=plan)
+        job = create_render_job(
+            tenant_id=payload.tenant_id,
+            event_id=payload.event_id,
+            plan=plan,
+            planner_prompt=payload.prompt,
+        )
         submit_render_job(job.id)
     except UnsafeRenderCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -408,13 +413,17 @@ def regenerate_with_feedback(payload: FeedbackUpdate) -> dict:
         include_asset_ids=payload.include_asset_ids,
         excluded_asset_ids=payload.exclude_asset_ids,
         include_media_types=payload.include_media_types,
-        render_subtitles=payload.render_subtitles,
-        render_overlays=payload.render_overlays,
+        video_orientation=payload.video_orientation,
     )
     context = get_event_context(payload.event_id)
     plan = build_plan(request, context)
     try:
-        job = create_render_job(tenant_id=payload.tenant_id, event_id=payload.event_id, plan=plan)
+        job = create_render_job(
+            tenant_id=payload.tenant_id,
+            event_id=payload.event_id,
+            plan=plan,
+            planner_prompt=payload.prompt,
+        )
         submit_render_job(job.id)
     except UnsafeRenderCommandError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

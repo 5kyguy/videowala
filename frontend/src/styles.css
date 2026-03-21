@@ -264,6 +264,37 @@ button:disabled {
   gap: 8px;
 }
 
+.render-preview-placeholder-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.render-prompt-for-video {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #0f172a;
+  border: 1px solid #334155;
+}
+
+.render-prompt-for-video-title {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #94a3b8;
+}
+
+.render-prompt-for-video-body {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.45;
+  color: #e2e8f0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .render-preview-video {
   width: 100%;
   max-height: min(50vh, 420px);

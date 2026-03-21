@@ -38,7 +38,7 @@ Event dashboard summary response includes:
 - face readiness (`persons_total`, `face_references_total`, `faces_saved`, face-match counters)
 - render status counters (`renders_total`, queued/running/completed/failed)
 
-Event renders response includes render jobs for that event (latest first), suitable for profile dashboard listing.
+Event renders response includes render jobs for that event (latest first), suitable for profile dashboard listing. Each job may include `planner_prompt` (the user prompt from the content request that produced the plan for that render) when the job was created via `/requests/render` or `/requests/feedback/regenerate`.
 
 ## Assets (register-by-path + index)
 
@@ -90,6 +90,7 @@ All three accept mostly the same core request fields:
 - `excluded_asset_ids` (array; used by `/requests/plan` and `/requests/render`)
 - `exclude_asset_ids` (array; used by `/requests/feedback/regenerate`)
 - `include_media_types` (array of `image|video`)
+- `video_orientation`: `landscape` | `portrait` — center crop to 16:9 or 9:16 (reels-style). ASR/OCR are for planner/indexing only; they are not burned into renders.
 
 Regenerate endpoint differences:
 

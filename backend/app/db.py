@@ -245,6 +245,14 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 6")
 
+        if version < 7:
+            cur.executescript(
+                """
+                ALTER TABLE render_specs ADD COLUMN render_options_json TEXT NOT NULL DEFAULT '{}';
+                """
+            )
+            cur.execute("PRAGMA user_version = 7")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)

@@ -11,6 +11,7 @@ from .schemas import (
     AssetInsight,
     Event,
     IndexJob,
+    OutputType,
     Person,
     PersonReference,
     PlannerAction,
@@ -436,13 +437,37 @@ class PlanRepository:
         if row is None:
             return None
         actions = [PlannerAction(**item) for item in decode_json(row["actions_json"])]
+        ot_raw = row["output_type"]
+        if isinstance(ot_raw, str):
+            try:
+                ot = OutputType(ot_raw)
+            except ValueError:
+                ot = OutputType.highlight_reel
+        else:
+            ot = OutputType.highlight_reel
         return PlannerPlan(
             tenant_id=row["tenant_id"],
             event_id=row["event_id"],
-            output_type=row["output_type"],
+            output_type=ot,
             rationale=row["rationale"],
             actions=actions,
         )
+
+
+def _planner_prompt_from_render_options_json(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    try:
+        opts = decode_json(raw)
+    except Exception:
+        return None
+    if not isinstance(opts, dict):
+        return None
+    p = opts.get("planner_prompt")
+    if p is None:
+        return None
+    s = str(p).strip()
+    return s or None
 
 
 class RenderRepository:
@@ -456,6 +481,7 @@ class RenderRepository:
         subtitles_enabled: bool = False,
         overlays_enabled: bool = False,
         clip_inputs: list[dict] | None = None,
+        render_options: dict | None = None,
     ) -> RenderJob:
         with db_cursor() as cur:
             cur.execute(
@@ -475,10 +501,14 @@ class RenderRepository:
                     to_iso(job.created_at),
                 ),
             )
+            ro = encode_json(render_options or {})
             cur.execute(
                 """
-                INSERT INTO render_specs (render_job_id, input_files_json, duration_seconds, scratch_dir, subtitles_enabled, overlays_enabled, clip_inputs_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO render_specs (
+                    render_job_id, input_files_json, duration_seconds, scratch_dir,
+                    subtitles_enabled, overlays_enabled, clip_inputs_json, render_options_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -488,6 +518,7 @@ class RenderRepository:
                     1 if subtitles_enabled else 0,
                     1 if overlays_enabled else 0,
                     encode_json(clip_inputs or []),
+                    ro,
                 ),
             )
         return job
@@ -495,9 +526,18 @@ class RenderRepository:
     @staticmethod
     def get(job_id: str) -> RenderJob | None:
         with db_cursor() as cur:
-            row = cur.execute("SELECT * FROM render_jobs WHERE id = ?", (job_id,)).fetchone()
+            row = cur.execute(
+                """
+                SELECT rj.*, rs.render_options_json AS _spec_render_options_json
+                FROM render_jobs rj
+                LEFT JOIN render_specs rs ON rs.render_job_id = rj.id
+                WHERE rj.id = ?
+                """,
+                (job_id,),
+            ).fetchone()
         if row is None:
             return None
+        ro_raw = row["_spec_render_options_json"] if "_spec_render_options_json" in row.keys() else None
         return RenderJob(
             id=row["id"],
             tenant_id=row["tenant_id"],
@@ -508,6 +548,7 @@ class RenderRepository:
             progress_percent=int(row["progress_percent"]) if "progress_percent" in row.keys() else 0,
             error_message=row["error_message"] if "error_message" in row.keys() else None,
             created_at=from_iso(row["created_at"]),
+            planner_prompt=_planner_prompt_from_render_options_json(ro_raw),
         )
 
     @staticmethod
@@ -515,9 +556,11 @@ class RenderRepository:
         with db_cursor() as cur:
             rows = cur.execute(
                 """
-                SELECT * FROM render_jobs
-                WHERE tenant_id = ? AND event_id = ?
-                ORDER BY created_at DESC
+                SELECT rj.*, rs.render_options_json AS _spec_render_options_json
+                FROM render_jobs rj
+                LEFT JOIN render_specs rs ON rs.render_job_id = rj.id
+                WHERE rj.tenant_id = ? AND rj.event_id = ?
+                ORDER BY rj.created_at DESC
                 """,
                 (tenant_id, event_id),
             ).fetchall()
@@ -532,6 +575,9 @@ class RenderRepository:
                 progress_percent=int(row["progress_percent"]) if "progress_percent" in row.keys() else 0,
                 error_message=row["error_message"] if "error_message" in row.keys() else None,
                 created_at=from_iso(row["created_at"]),
+                planner_prompt=_planner_prompt_from_render_options_json(
+                    row["_spec_render_options_json"] if "_spec_render_options_json" in row.keys() else None
+                ),
             )
             for row in rows
         ]
@@ -542,6 +588,13 @@ class RenderRepository:
             row = cur.execute("SELECT * FROM render_specs WHERE render_job_id = ?", (job_id,)).fetchone()
         if row is None:
             return None
+        ro_raw = row["render_options_json"] if "render_options_json" in row.keys() else None
+        try:
+            render_options = decode_json(ro_raw) if ro_raw else {}
+        except Exception:
+            render_options = {}
+        if not isinstance(render_options, dict):
+            render_options = {}
         return {
             "input_files": decode_json(row["input_files_json"]),
             "duration_seconds": row["duration_seconds"],
@@ -549,6 +602,7 @@ class RenderRepository:
             "subtitles_enabled": bool(row["subtitles_enabled"]) if "subtitles_enabled" in row.keys() else False,
             "overlays_enabled": bool(row["overlays_enabled"]) if "overlays_enabled" in row.keys() else False,
             "clip_inputs": decode_json(row["clip_inputs_json"]) if "clip_inputs_json" in row.keys() and row["clip_inputs_json"] else [],
+            "render_options": render_options,
         }
 
     @staticmethod
@@ -572,6 +626,31 @@ class RenderRepository:
                 """,
                 (status, output_path, progress_percent, error_message, job_id),
             )
+
+    @staticmethod
+    def mark_incomplete_jobs_failed(reason: str) -> int:
+        """Fail queued/running jobs left behind after process restart/reload."""
+        with db_cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT id FROM render_jobs
+                WHERE status IN ('queued', 'running')
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+            for row in rows:
+                cur.execute(
+                    """
+                    UPDATE render_jobs
+                    SET status = 'failed',
+                        progress_percent = 100,
+                        error_message = ?
+                    WHERE id = ?
+                    """,
+                    (reason, row["id"]),
+                )
+            return len(rows)
 
 
 class IndexJobRepository:

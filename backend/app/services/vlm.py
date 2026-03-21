@@ -138,7 +138,9 @@ def _build_vlm_prompt(*, predefined_tags: list[str], event_context: dict | None)
         "Return JSON only with exactly these keys:",
         '- "caption": one vivid sentence about what is happening (people, setting, mood).',
         '- "tags": array of short lowercase tags. Prefer tags from the ALLOWED list when they apply; '
-        "you may add new short tags not in the list when needed.",
+        "you may add new short tags not in the list when needed. "
+        "If the scene is sideways because the camera was rotated wrong, add exactly one of: "
+        "`needs_rotate_ccw` (rotate 90° counter-clockwise to upright) or `needs_rotate_cw` (rotate 90° clockwise).",
         '- "caption_confidence": your estimated confidence in the caption, number between 0 and 1.',
         "No markdown or code fences.",
         "",

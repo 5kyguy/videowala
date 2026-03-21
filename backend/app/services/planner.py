@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from ..repositories import AssetRepository, PlanRepository, SegmentRepository
-from ..schemas import Asset, ContentRequestCreate, PlannerAction, PlannerPlan
+from ..schemas import Asset, ContentRequestCreate, OutputType, PlannerAction, PlannerPlan
 from .search import semantic_search
 from .privacy import audit_action
 
@@ -42,9 +42,106 @@ def _build_asset_context(event_context: dict) -> dict[str, dict]:
     return by_asset
 
 
+def _semantic_asset_scores(request: ContentRequestCreate) -> dict[str, float]:
+    if not (request.prompt and request.prompt.strip()):
+        return {}
+    try:
+        hits = semantic_search(
+            tenant_id=request.tenant_id,
+            event_id=request.event_id,
+            query=request.prompt,
+            limit=50,
+        )
+    except Exception:
+        return {}
+    out: dict[str, float] = {}
+    for h in hits:
+        aid = h.get("asset_id")
+        if not aid:
+            continue
+        sc = float(h.get("score", 0.0) or 0.0)
+        out[aid] = max(out.get(aid, 0.0), sc)
+    return out
+
+
+def _diversify_by_asset(rows: list[dict], max_per_asset: int = 4) -> list[dict]:
+    """Keep score ordering but cap how many segments we take per asset (highlight reel)."""
+    sorted_rows = sorted(rows, key=lambda x: -float(x.get("score", 0.0)))
+    counts: dict[str, int] = {}
+    out: list[dict] = []
+    for r in sorted_rows:
+        aid = r["asset_id"]
+        if counts.get(aid, 0) >= max_per_asset:
+            continue
+        out.append(r)
+        counts[aid] = counts.get(aid, 0) + 1
+    return out
+
+
+def _order_kept_segments(
+    kept: list[dict],
+    output_type: OutputType,
+    asset_map: dict[str, Asset],
+    asset_ctx: dict[str, dict],
+    request: ContentRequestCreate,
+) -> list[dict]:
+    if output_type == OutputType.chronological_film:
+        return sorted(
+            kept,
+            key=lambda r: (
+                asset_map[r["asset_id"]].created_at.isoformat() if r["asset_id"] in asset_map else "",
+                float(r.get("start_s", 0.0)),
+            ),
+        )
+    if output_type == OutputType.person_focus_reel:
+
+        def pkey(r: dict) -> tuple:
+            faces = asset_ctx.get(r["asset_id"], {}).get("faces", set())
+            hit = bool(request.include_faces and any(f in faces for f in request.include_faces))
+            return (0 if hit else 1, -float(r.get("score", 0.0)))
+
+        return sorted(kept, key=pkey)
+    if output_type == OutputType.highlight_reel:
+        return _diversify_by_asset(kept, max_per_asset=4)
+    return sorted(kept, key=lambda x: -float(x.get("score", 0.0)))
+
+
+def _filter_person_focus_pool(
+    kept: list[dict],
+    asset_ctx: dict[str, dict],
+    request: ContentRequestCreate,
+) -> list[dict]:
+    if not request.include_faces:
+        return kept
+    matched = [
+        r
+        for r in kept
+        if any(
+            f in asset_ctx.get(r["asset_id"], {}).get("faces", set())
+            for f in request.include_faces
+        )
+    ]
+    if len(matched) >= max(4, min(len(kept), len(kept) // 3 + 1)):
+        return matched
+    return kept
+
+
+def _set_order_strategy(output_type: OutputType) -> str:
+    if output_type == OutputType.chronological_film:
+        return "chronological_capture"
+    if output_type == OutputType.person_focus_reel:
+        return "person_focus"
+    if output_type == OutputType.highlight_reel:
+        return "highlight_diverse"
+    return "ranked"
+
+
 def _score_segments(
     request: ContentRequestCreate,
     event_context: dict,
+    output_type: OutputType,
+    asset_ctx: dict[str, dict],
+    semantic_by_asset: dict[str, float],
 ) -> list[dict]:
     segments = SegmentRepository.list_for_event(request.event_id, keep_only=False)
     if not segments:
@@ -53,7 +150,6 @@ def _score_segments(
     assets = AssetRepository.list_for_event(request.event_id)
     asset_map = {a.id: a for a in assets}
 
-    asset_ctx = _build_asset_context(event_context)
     prompt_tokens = _tokenize(request.prompt)
 
     signature_top: dict[str, tuple[str, float]] = {}
@@ -72,12 +168,22 @@ def _score_segments(
         ctx = asset_ctx.get(seg.asset_id, {"text": [], "faces": set()})
         text_tokens = _tokenize(" ".join(ctx["text"]))
         overlap = len(prompt_tokens.intersection(text_tokens)) / max(1, len(prompt_tokens))
+        sem = float(semantic_by_asset.get(seg.asset_id, 0.0))
+
         face_bonus = 0.0
         if request.include_faces:
             hit = any(face_id in ctx["faces"] for face_id in request.include_faces)
-            face_bonus = 0.12 if hit else -0.05
+            if output_type == OutputType.person_focus_reel:
+                face_bonus = 0.22 if hit else -0.08
+            else:
+                face_bonus = 0.12 if hit else -0.05
         include_bonus = 0.15 if seg.asset_id in request.include_asset_ids else 0.0
-        final_score = max(0.0, min(1.0, round(float(seg.score) + 0.45 * overlap + face_bonus + include_bonus, 4)))
+        # Blend lexical overlap with semantic retrieval score (both in ~0..1).
+        relevance = min(1.0, 0.32 * overlap + 0.38 * sem)
+        final_score = max(
+            0.0,
+            min(1.0, round(float(seg.score) + relevance + face_bonus + include_bonus, 4)),
+        )
 
         signature = f"{asset.media_type}:{asset.media_path}:{round(seg.start_s,1)}:{round(seg.end_s,1)}"
         prev = signature_top.get(signature)
@@ -107,15 +213,19 @@ def _score_segments(
 
     kept = [row for row in scored if row["keep"]]
     if len(kept) < 4:
-        scored = sorted(scored, key=lambda x: x["score"], reverse=True)
+        scored_sorted = sorted(scored, key=lambda x: x["score"], reverse=True)
         fallback_updates: list[tuple[str, float, bool, bool, list[str]]] = []
-        for row in scored[: max(4, len(kept))]:
+        for row in scored_sorted[: max(4, len(kept))]:
             if not row["keep"]:
                 fallback_updates.append((row["segment_id"], row["score"], True, False, ["fallback_sparse_pool"]))
                 row["keep"] = True
         SegmentRepository.batch_update_culling(fallback_updates)
         kept = [row for row in scored if row["keep"]]
-    kept.sort(key=lambda x: x["score"], reverse=True)
+
+    if output_type == OutputType.person_focus_reel:
+        kept = _filter_person_focus_pool(kept, asset_ctx, request)
+
+    kept = _order_kept_segments(kept, output_type, asset_map, asset_ctx, request)
     return kept
 
 
@@ -136,12 +246,19 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
             return False
         return asset.media_type in allowed_media
 
-    ranked_segments = _score_segments(request, event_context)
+    asset_ctx = _build_asset_context(event_context)
+    semantic_by_asset = _semantic_asset_scores(request)
+    ranked_segments = _score_segments(
+        request,
+        event_context,
+        request.output_type,
+        asset_ctx,
+        semantic_by_asset,
+    )
     ranked_asset_ids = [row["asset_id"] for row in ranked_segments]
     ranked_segment_ids = [row["segment_id"] for row in ranked_segments]
 
     if not ranked_asset_ids:
-        # Backward-compatible fallback when segment rows have not been indexed yet.
         for bucket in ("vlm_caption", "vlm_tags", "face_matches"):
             for item in event_context.get(bucket, []):
                 aid = item.get("asset_id")
@@ -153,7 +270,6 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
                     continue
                 ranked_asset_ids.append(aid)
 
-    # Backfill with semantic hits if segment pool is sparse.
     if request.prompt and len(ranked_asset_ids) < 12:
         try:
             hits = semantic_search(
@@ -171,26 +287,27 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
     remaining = [asset_id for asset_id in dedup_ids if asset_id not in include_first]
     dedup_ids = (include_first + remaining)[:30]
     ranked_segment_ids = ranked_segment_ids[:80]
+
+    order_strategy = _set_order_strategy(request.output_type)
+    rationale = (
+        f"Plan: output_type={request.output_type.value}, order={order_strategy}, "
+        "segment scoring blends lexical overlap + semantic retrieval + cull score."
+    )
+
     actions = [
         PlannerAction(action="select_segments", params={"asset_ids": dedup_ids, "segment_ids": ranked_segment_ids}),
-        PlannerAction(action="set_order", params={"strategy": "chronological"}),
+        PlannerAction(action="set_order", params={"strategy": order_strategy}),
         PlannerAction(action="set_duration", params={"seconds": request.target_duration_seconds}),
-        PlannerAction(action="render_preview", params={"format": "mp4"}),
+        PlannerAction(
+            action="render_preview",
+            params={"format": "mp4", "orientation": request.video_orientation},
+        ),
     ]
-    if request.render_subtitles:
-        actions.append(PlannerAction(action="render_subtitles", params={"source": "asr", "style": "default"}))
-    if request.render_overlays:
-        actions.append(
-            PlannerAction(
-                action="render_overlays",
-                params={"source": "ocr", "max_items": 5, "strategy": "keyframes"},
-            )
-        )
     plan = PlannerPlan(
         tenant_id=request.tenant_id,
         event_id=request.event_id,
         output_type=request.output_type,
-        rationale="Plan generated from ranked segment culling with context-aware fallback.",
+        rationale=rationale,
         actions=actions,
     )
     validate_plan(plan)
@@ -206,8 +323,6 @@ def validate_plan(plan: PlannerPlan) -> None:
         "set_duration",
         "render_preview",
         "exclude_segments",
-        "render_subtitles",
-        "render_overlays",
     }
     if not plan.actions:
         raise PlannerValidationError("Planner returned no actions.")

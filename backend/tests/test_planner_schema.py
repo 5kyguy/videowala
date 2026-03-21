@@ -74,6 +74,22 @@ def test_feedback_include_exclude_affects_plan_selection() -> None:
     assert selected[0] == "a2"
 
 
+def test_video_orientation_in_render_preview_params() -> None:
+    _ensure_event()
+    request = ContentRequestCreate(
+        tenant_id="tenant_a",
+        event_id="event_a",
+        output_type=OutputType.highlight_reel,
+        prompt="Portrait reel output.",
+        target_duration_seconds=60,
+        video_orientation="portrait",
+    )
+    context = {"vlm_caption": [{"asset_id": "a1"}], "vlm_tags": [], "face_matches": []}
+    plan = build_plan(request, context)
+    preview = next(a for a in plan.actions if a.action == "render_preview")
+    assert preview.params.get("orientation") == "portrait"
+
+
 def test_include_media_types_filters_to_video_only() -> None:
     from app.schemas import Asset
 

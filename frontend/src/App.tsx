@@ -1,7 +1,15 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createApiClient, getDefaultApiBaseUrl } from "./api";
-import type { Event, EventSummary, OutputType, Person, PersonFaceReferenceListItem, RenderJobListItem } from "./types";
+import type {
+  Event,
+  EventSummary,
+  OutputType,
+  Person,
+  PersonFaceReferenceListItem,
+  RenderJobListItem,
+  VideoOrientation
+} from "./types";
 
 const PROFILE_STORAGE_KEY = "videowala_profiles";
 const DEFAULT_OUTPUT_TYPE: OutputType = "highlight_reel";
@@ -43,13 +51,12 @@ export default function App() {
   const [persons, setPersons] = useState<Person[]>([]);
   const [faceRefs, setFaceRefs] = useState<PersonFaceReferenceListItem[]>([]);
 
-  const [eventTitle, setEventTitle] = useState("Demo Event");
+  const [eventTitle, setEventTitle] = useState("wedding1");
   const [eventType, setEventType] = useState("wedding");
   const [eventVenue, setEventVenue] = useState("");
   const [eventDate, setEventDate] = useState("");
 
   const [ingestPath, setIngestPath] = useState("media");
-  const [ingestRecursive, setIngestRecursive] = useState(true);
   const [ingestNote, setIngestNote] = useState("");
 
   const [newPersonName, setNewPersonName] = useState("");
@@ -62,8 +69,7 @@ export default function App() {
   const [durationSeconds, setDurationSeconds] = useState(60);
   const [includeAssetIds, setIncludeAssetIds] = useState("");
   const [excludeAssetIds, setExcludeAssetIds] = useState("");
-  const [wantSubtitles, setWantSubtitles] = useState(false);
-  const [wantOverlays, setWantOverlays] = useState(false);
+  const [videoOrientation, setVideoOrientation] = useState<VideoOrientation>("landscape");
   const [planPreviewJson, setPlanPreviewJson] = useState("");
   const [lastRenderNote, setLastRenderNote] = useState("");
 
@@ -259,7 +265,7 @@ export default function App() {
         tenant_id: tenantId,
         event_id: selectedEventId,
         path: ingestPath.trim(),
-        recursive: ingestRecursive
+        recursive: true
       });
       setIngestNote(
         `Registered ${response.count} file(s)${response.failed != null && response.failed > 0 ? `, ${response.failed} failed` : ""}. ` +
@@ -339,8 +345,7 @@ export default function App() {
         include_asset_ids: parseIdList(includeAssetIds),
         excluded_asset_ids: parseIdList(excludeAssetIds),
         include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
+        video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
       setStatus("Plan created (preview below).");
@@ -363,8 +368,7 @@ export default function App() {
         include_asset_ids: parseIdList(includeAssetIds),
         excluded_asset_ids: parseIdList(excludeAssetIds),
         include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
+        video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
       setLastRenderNote(`Render job ${response.render_job.id} — ${response.render_job.status}.`);
@@ -388,8 +392,7 @@ export default function App() {
         include_asset_ids: parseIdList(includeAssetIds),
         exclude_asset_ids: parseIdList(excludeAssetIds),
         include_media_types: [],
-        render_subtitles: wantSubtitles,
-        render_overlays: wantOverlays
+        video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
       setLastRenderNote(`Render job ${response.render_job.id} — ${response.render_job.status}.`);
@@ -408,12 +411,8 @@ export default function App() {
       <header className="topbar">
         <div>
           <h1>VideoWala PoC Dashboard</h1>
-          <p>Profile-based event workspace with event health and render visibility.</p>
+          <p>(something here)</p>
         </div>
-        <label>
-          API base URL
-          <input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} />
-        </label>
       </header>
 
       <section className="card">
@@ -505,7 +504,7 @@ export default function App() {
                       <h3>Indexing</h3>
                       <p>
                         {summary.stats.index_jobs_completed + summary.stats.index_jobs_failed} /{" "}
-                        {summary.stats.index_jobs_total || summary.stats.assets_total} jobs done
+                        {summary.stats.index_jobs_total || summary.stats.assets_total} assets indexed
                       </p>
                       <p className="muted">
                         {summary.stats.index_jobs_queued} queued, {summary.stats.index_jobs_running} running,{" "}
@@ -533,27 +532,17 @@ export default function App() {
           <section className="card">
             <h2>Ingest media</h2>
             <p className="muted">
-              Path must be reachable from the <strong>backend</strong> host (file or folder). Known image/video
-              extensions are registered and indexed.
+              Path must be relative to the backend project root (/home/lampros/videowala/). Accepts both files and folders.
             </p>
             <div className="workflow-grid">
               <label>
-                Path (file or folder)
+                Path
                 <input
                   value={ingestPath}
                   onChange={(e) => setIngestPath(e.target.value)}
                   placeholder="e.g. test/media or /data/wedding"
                   disabled={!selectedEventId}
                 />
-              </label>
-              <label className="checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={ingestRecursive}
-                  onChange={(e) => setIngestRecursive(e.target.checked)}
-                  disabled={!selectedEventId}
-                />
-                Include subfolders
               </label>
               <button type="button" onClick={() => void handleIngest()} disabled={loading || !selectedEventId}>
                 Ingest
@@ -565,16 +554,15 @@ export default function App() {
           <section className="card">
             <h2>People &amp; face references</h2>
             <p className="muted">
-              People are stored on this <strong>event</strong> only. Reference photos are uploaded to the backend and used
+              People are stored for this <strong>event</strong> only. Reference photos are uploaded to the backend and used
               when indexing runs to match faces in your media. Add names and photos anytime; if media is already indexed,
-              use <strong>Re-run face matching</strong> to refresh face matches only (does not re-run VLM/OCR — usually
-              seconds, and the rest of the UI stays usable).
+              use <strong>Re-run face matching</strong> to refresh face matches only.
             </p>
             <form className="stack face-form" onSubmit={(e) => void handleAddPersonWithPhoto(e)}>
               <h3>New person</h3>
               <div className="workflow-grid">
                 <label>
-                  Display name
+                  Person name
                   <input
                     value={newPersonName}
                     onChange={(e) => setNewPersonName(e.target.value)}
@@ -598,7 +586,7 @@ export default function App() {
               </div>
             </form>
             <form className="stack face-form" onSubmit={(e) => void handleAddExtraFaceReference(e)}>
-              <h3>Another photo for an existing person</h3>
+              <h3>Re-upload photo for an existing person</h3>
               <div className="workflow-grid">
                 <label>
                   Person
@@ -625,7 +613,7 @@ export default function App() {
                   />
                 </label>
                 <button type="submit" disabled={loading || !selectedEventId || persons.length === 0}>
-                  Add reference
+                  Re-upload photo
                 </button>
               </div>
             </form>
@@ -667,8 +655,7 @@ export default function App() {
           <section className="card">
             <h2>Plan + render</h2>
             <p className="muted">
-              Uses the same backend routes as the API docs: <code>/requests/plan</code>, <code>/requests/render</code>,{" "}
-              <code>/requests/feedback/regenerate</code>.
+              Use the planner to create a plan for the render. Then use the render button to render the video. Render can be used straight away or you can regenerate the plan and render again.
             </p>
             <div className="workflow-grid">
               <label className="span-2">
@@ -698,7 +685,7 @@ export default function App() {
                   disabled={!selectedEventId}
                 />
               </label>
-              <label>
+              {/* <label>
                 Include asset IDs (comma-separated)
                 <input
                   value={includeAssetIds}
@@ -713,24 +700,17 @@ export default function App() {
                   onChange={(e) => setExcludeAssetIds(e.target.value)}
                   disabled={!selectedEventId}
                 />
-              </label>
-              <label className="checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={wantSubtitles}
-                  onChange={(e) => setWantSubtitles(e.target.checked)}
+              </label> */}
+              <label>
+                Output orientation
+                <select
+                  value={videoOrientation}
+                  onChange={(e) => setVideoOrientation(e.target.value as VideoOrientation)}
                   disabled={!selectedEventId}
-                />
-                Burn ASR subtitles
-              </label>
-              <label className="checkbox-inline">
-                <input
-                  type="checkbox"
-                  checked={wantOverlays}
-                  onChange={(e) => setWantOverlays(e.target.checked)}
-                  disabled={!selectedEventId}
-                />
-                Draw OCR overlays
+                >
+                  <option value="landscape">Landscape (16:9 center crop)</option>
+                  <option value="portrait">Portrait / reels (9:16 center crop)</option>
+                </select>
               </label>
               <div className="button-row">
                 <button type="button" onClick={() => void handleCreatePlan()} disabled={loading || !selectedEventId}>
@@ -796,6 +776,12 @@ export default function App() {
                 {selectedRenderJob ? (
                   selectedRenderJob.status === "completed" ? (
                     <div className="render-video-wrap">
+                      {selectedRenderJob.planner_prompt ? (
+                        <div className="render-prompt-for-video">
+                          <p className="render-prompt-for-video-title">Prompt for this render was</p>
+                          <p className="render-prompt-for-video-body">{selectedRenderJob.planner_prompt}</p>
+                        </div>
+                      ) : null}
                       <video
                         key={selectedRenderJob.id}
                         className="render-preview-video"
@@ -807,10 +793,18 @@ export default function App() {
                       <p className="muted small render-preview-caption">{selectedRenderJob.id}</p>
                     </div>
                   ) : (
-                    <p className="muted render-preview-placeholder">
-                      <strong>{selectedRenderJob.id}</strong> is <strong>{selectedRenderJob.status}</strong>. The player
-                      appears when the job completes.
-                    </p>
+                    <div className="render-preview-placeholder-wrap">
+                      {selectedRenderJob.planner_prompt ? (
+                        <div className="render-prompt-for-video">
+                          <p className="render-prompt-for-video-title">Prompt for this render was</p>
+                          <p className="render-prompt-for-video-body">{selectedRenderJob.planner_prompt}</p>
+                        </div>
+                      ) : null}
+                      <p className="muted render-preview-placeholder">
+                        <strong>{selectedRenderJob.id}</strong> is <strong>{selectedRenderJob.status}</strong>. The player
+                        appears when the job completes.
+                      </p>
+                    </div>
                   )
                 ) : (
                   <p className="muted render-preview-placeholder">Select a render to preview.</p>

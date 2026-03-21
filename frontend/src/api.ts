@@ -8,7 +8,8 @@ import type {
   PersonReference,
   PlannerPlan,
   RenderJob,
-  RenderJobListItem
+  RenderJobListItem,
+  VideoOrientation
 } from "./types";
 
 export type ApiClientConfig = {
@@ -121,8 +122,7 @@ export function createApiClient(config: ApiClientConfig) {
       include_asset_ids: string[];
       excluded_asset_ids: string[];
       include_media_types: MediaType[];
-      render_subtitles: boolean;
-      render_overlays: boolean;
+      video_orientation: VideoOrientation;
     }) => request<{ plan: PlannerPlan }>(baseUrl, "/requests/plan", { method: "POST", body: JSON.stringify(payload) }),
     render: (payload: {
       tenant_id: string;
@@ -134,8 +134,7 @@ export function createApiClient(config: ApiClientConfig) {
       include_asset_ids: string[];
       excluded_asset_ids: string[];
       include_media_types: MediaType[];
-      render_subtitles: boolean;
-      render_overlays: boolean;
+      video_orientation: VideoOrientation;
     }) =>
       request<{ plan: PlannerPlan; render_job: RenderJob }>(baseUrl, "/requests/render", {
         method: "POST",
@@ -150,8 +149,7 @@ export function createApiClient(config: ApiClientConfig) {
       include_asset_ids: string[];
       exclude_asset_ids: string[];
       include_media_types: MediaType[];
-      render_subtitles: boolean;
-      render_overlays: boolean;
+      video_orientation: VideoOrientation;
     }) =>
       request<{ status: string; plan: PlannerPlan; render_job: RenderJob }>(baseUrl, "/requests/feedback/regenerate", {
         method: "POST",

@@ -1,5 +1,7 @@
 export type OutputType = "highlight_reel" | "chronological_film" | "person_focus_reel";
 export type MediaType = "image" | "video";
+/** Landscape ≈ 16:9 center crop; portrait ≈ 9:16 reels-style center crop (no resolution/fps targets). */
+export type VideoOrientation = "landscape" | "portrait";
 
 export type Event = {
   id: string;
@@ -64,6 +66,8 @@ export type RenderJob = {
   progress_percent?: number;
   error_message?: string | null;
   created_at: string;
+  /** Present when the job was created from a content request with a prompt (stored in render spec). */
+  planner_prompt?: string | null;
 };
 
 export type EventSummaryStats = {
