@@ -98,3 +98,18 @@ export type EventSummary = {
 };
 
 export type RenderJobListItem = RenderJob;
+
+/** Image culling row from GET /events/.../photos/curation (video assets excluded). */
+export type PhotoCurationItem = {
+  asset_id: string;
+  segment_id: string;
+  score: number;
+  keep: boolean;
+  is_duplicate: boolean;
+  reject_reasons: string[];
+};
+
+export type PhotoCurationListResponse = {
+  event_id: string;
+  items: PhotoCurationItem[];
+};

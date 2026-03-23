@@ -4,7 +4,9 @@ import pytest
 
 from app.db import now_utc, reset_database_for_tests
 from app.repositories import AssetRepository, EventRepository
-from app.schemas import ContentRequestCreate, Event, OutputType, PlannerAction, PlannerPlan
+from pydantic import ValidationError
+
+from app.schemas import Asset, ContentRequestCreate, Event, OutputType, PlannerAction, PlannerPlan
 from app.services.planner import PlannerValidationError, build_plan, validate_plan
 
 
@@ -49,10 +51,34 @@ def test_content_request_schema_valid() -> None:
         target_duration_seconds=60,
     )
     assert request.output_type == OutputType.highlight_reel
+    assert request.include_media_types == ["video"]
+
+
+def test_content_request_rejects_image_only_media_types() -> None:
+    with pytest.raises(ValidationError):
+        ContentRequestCreate(
+            tenant_id="tenant_a",
+            event_id="event_a",
+            output_type=OutputType.highlight_reel,
+            prompt="Enough chars for prompt.",
+            target_duration_seconds=60,
+            include_media_types=["image"],
+        )
 
 
 def test_feedback_include_exclude_affects_plan_selection() -> None:
     _ensure_event()
+    for aid in ("a1", "a2", "a3"):
+        AssetRepository.create(
+            Asset(
+                id=aid,
+                tenant_id="tenant_a",
+                event_id="event_a",
+                media_path=f"media/{aid}.mp4",
+                media_type="video",
+                created_at=now_utc(),
+            )
+        )
     request = ContentRequestCreate(
         tenant_id="tenant_a",
         event_id="event_a",
@@ -76,6 +102,16 @@ def test_feedback_include_exclude_affects_plan_selection() -> None:
 
 def test_video_orientation_in_render_preview_params() -> None:
     _ensure_event()
+    AssetRepository.create(
+        Asset(
+            id="a1",
+            tenant_id="tenant_a",
+            event_id="event_a",
+            media_path="media/a1.mp4",
+            media_type="video",
+            created_at=now_utc(),
+        )
+    )
     request = ContentRequestCreate(
         tenant_id="tenant_a",
         event_id="event_a",

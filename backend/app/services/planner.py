@@ -54,13 +54,18 @@ def _semantic_asset_scores(request: ContentRequestCreate) -> dict[str, float]:
         )
     except Exception:
         return {}
+    allowed_media = set(request.include_media_types)
     out: dict[str, float] = {}
     for h in hits:
         aid = h.get("asset_id")
         if not aid:
             continue
+        if allowed_media:
+            asset = AssetRepository.get(str(aid))
+            if asset is None or asset.media_type not in allowed_media:
+                continue
         sc = float(h.get("score", 0.0) or 0.0)
-        out[aid] = max(out.get(aid, 0.0), sc)
+        out[str(aid)] = max(out.get(str(aid), 0.0), sc)
     return out
 
 
@@ -278,7 +283,11 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
                 query=request.prompt,
                 limit=30,
             )
-            ranked_asset_ids.extend([h["asset_id"] for h in hits])
+            for h in hits:
+                aid = h.get("asset_id")
+                if not aid or not media_type_allowed(str(aid)):
+                    continue
+                ranked_asset_ids.append(str(aid))
         except Exception:
             pass
 

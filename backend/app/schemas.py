@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Literal
+from typing import Literal, Self
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -150,11 +150,29 @@ class ContentRequestCreate(BaseModel):
     include_faces: list[str] = Field(default_factory=list)
     include_asset_ids: list[str] = Field(default_factory=list)
     excluded_asset_ids: list[str] = Field(default_factory=list)
-    include_media_types: list[Literal["image", "video"]] = Field(default_factory=list)
+    include_media_types: list[Literal["image", "video"]] = Field(
+        default_factory=list,
+        description="Planner/render pool: video only. Empty means ['video'].",
+    )
     video_orientation: VideoOrientation = Field(
         default="landscape",
         description="Output framing: landscape (16:9 crop) or portrait / reels (9:16 crop). No resolution or fps targets.",
     )
+
+    @model_validator(mode="after")
+    def video_only_planner_pool(self) -> Self:
+        """Video render/plan track uses video assets only; images are curated elsewhere."""
+        allowed: set[str] = set()
+        for m in self.include_media_types:
+            if m in ("image", "video"):
+                allowed.add(m)
+        if not allowed:
+            object.__setattr__(self, "include_media_types", ["video"])
+            return self
+        if "video" not in allowed:
+            raise ValueError("Planning and render use video only; include_media_types cannot be image-only.")
+        object.__setattr__(self, "include_media_types", ["video"])
+        return self
 
 
 class PlannerAction(BaseModel):
@@ -219,11 +237,42 @@ class FeedbackUpdate(BaseModel):
     target_duration_seconds: int = Field(default=60, ge=5, le=3600)
     include_asset_ids: list[str] = Field(default_factory=list)
     exclude_asset_ids: list[str] = Field(default_factory=list)
-    include_media_types: list[Literal["image", "video"]] = Field(default_factory=list)
+    include_media_types: list[Literal["image", "video"]] = Field(
+        default_factory=list,
+        description="Regenerate uses the video-only render pool; empty means ['video'].",
+    )
     video_orientation: VideoOrientation = Field(
         default="landscape",
         description="Output framing: landscape (16:9 crop) or portrait / reels (9:16 crop).",
     )
+
+    @model_validator(mode="after")
+    def video_only_regenerate_pool(self) -> Self:
+        allowed: set[str] = set()
+        for m in self.include_media_types:
+            if m in ("image", "video"):
+                allowed.add(m)
+        if not allowed:
+            object.__setattr__(self, "include_media_types", ["video"])
+            return self
+        if "video" not in allowed:
+            raise ValueError("Regenerate uses video only; include_media_types cannot be image-only.")
+        object.__setattr__(self, "include_media_types", ["video"])
+        return self
+
+
+class PhotoCurationItem(BaseModel):
+    asset_id: str
+    segment_id: str
+    score: float
+    keep: bool
+    is_duplicate: bool
+    reject_reasons: list[str] = Field(default_factory=list)
+
+
+class PhotoCurationListResponse(BaseModel):
+    event_id: str
+    items: list[PhotoCurationItem]
 
 
 class EventSummaryStats(BaseModel):

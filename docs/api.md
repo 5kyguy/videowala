@@ -73,6 +73,12 @@ curl -s -X POST http://localhost:8000/assets \
 - `GET /events/{event_id}/search?tenant_id=...&q=...&limit=20`
   - Requires pgvector data to exist; returns best-effort results (may be empty if Postgres/pgvector is unavailable or no vectors were upserted yet).
 
+## Photo curation (images only)
+
+- `GET /events/{event_id}/photos/curation?tenant_id=...` — returns `{ event_id, items }` where each item is an indexed **image** segment: `asset_id`, `segment_id`, `score`, `keep`, `is_duplicate`, `reject_reasons`. Video assets are not listed here.
+- `GET /events/{event_id}/assets/{asset_id}/media?tenant_id=...` — serves the original image file for that event asset (images only; tenant/event scoped).
+- `GET /events/{event_id}/photos/export-kept?tenant_id=...` — downloads a ZIP of **kept** photos (`keep=true` and not duplicate) under `kept/` in the archive.
+
 ## Planner + rendering
 
 - `POST /requests/plan`
@@ -89,7 +95,7 @@ All three accept mostly the same core request fields:
 - `include_asset_ids` (array of asset IDs to pin early)
 - `excluded_asset_ids` (array; used by `/requests/plan` and `/requests/render`)
 - `exclude_asset_ids` (array; used by `/requests/feedback/regenerate`)
-- `include_media_types` (array of `image|video`)
+- `include_media_types` — optional; **empty defaults to `["video"]`**. Image-only values are rejected. Planning and render pools are **video-only**; stills use the photo curation endpoints above.
 - `video_orientation`: `landscape` | `portrait` — center crop to 16:9 or 9:16 (reels-style). ASR/OCR are for planner/indexing only; they are not burned into renders.
 
 Regenerate endpoint differences:

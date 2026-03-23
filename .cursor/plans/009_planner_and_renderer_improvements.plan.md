@@ -53,10 +53,10 @@ flowchart LR
 - *person_focus_reel*: rank/boost segments whose `face_matches` include `include_faces`, filter to those assets first.
 - *highlight_reel*: emphasize diversity (avoid many segments from one asset), max clips per asset, or boost semantic match + pacing.
 
-2. **Richer relevance than token overlap** — Today `[_tokenize](backend/app/services/planner.py)` + Jaccard-style ratio is brittle for paraphrases. Options: use the same **embedding model** as search to score each segment’s text against `request.prompt`, or hybrid (embedding + keyword).
-3. **Tighter coupling to indexing** — Segment `score` already reflects VLM/cull; planner could add explicit use of **tags** (e.g. prompt mentions “speech” → boost ASR-heavy assets) or **negative prompts** (exclude tags).
-4. **Plan actions that match capabilities** — e.g. `set_order` params could carry `primary_person_id` or `max_segments_per_asset`; `exclude_segments` is validated but **never emitted** by `build_plan`—could wire real exclusions from UI.
-5. **Optional LLM planner (later)** — Small local LLM to map `ContentRequestCreate` + JSON context into actions; higher effort, only if rule-based limits are hit.
+1. **Richer relevance than token overlap** — Today `[_tokenize](backend/app/services/planner.py)` + Jaccard-style ratio is brittle for paraphrases. Options: use the same **embedding model** as search to score each segment’s text against `request.prompt`, or hybrid (embedding + keyword).
+2. **Tighter coupling to indexing** — Segment `score` already reflects VLM/cull; planner could add explicit use of **tags** (e.g. prompt mentions “speech” → boost ASR-heavy assets) or **negative prompts** (exclude tags).
+3. **Plan actions that match capabilities** — e.g. `set_order` params could carry `primary_person_id` or `max_segments_per_asset`; `exclude_segments` is validated but **never emitted** by `build_plan`—could wire real exclusions from UI.
+4. **Optional LLM planner (later)** — Small local LLM to map `ContentRequestCreate` + JSON context into actions; higher effort, only if rule-based limits are hit.
 
 ---
 

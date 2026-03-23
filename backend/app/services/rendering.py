@@ -297,37 +297,6 @@ def _prepare_video_clip_range(
     ]
 
 
-def _prepare_image_clip(
-    input_file: str,
-    output_clip: Path,
-    seconds: int,
-    *,
-    vf: str,
-    framerate: str,
-) -> list[str]:
-    return [
-        "ffmpeg",
-        "-y",
-        "-loop",
-        "1",
-        "-framerate",
-        framerate,
-        "-i",
-        input_file,
-        "-f",
-        "lavfi",
-        "-i",
-        "anullsrc=channel_layout=stereo:sample_rate=44100",
-        "-t",
-        str(seconds),
-        "-vf",
-        vf,
-        "-shortest",
-        *_encode_video_audio_args(),
-        str(output_clip),
-    ]
-
-
 def _pad_to_canvas(input_path: Path, output_path: Path, target_w: int, target_h: int) -> list[str]:
     vf = f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black"
     return [
@@ -443,9 +412,10 @@ def _render_from_inputs(
         transpose = int(item.get("display_transpose", 0) or 0)
         vf = _build_transpose_and_crop_vf(transpose, orientation)
         if source.suffix.lower() in IMAGE_EXTS:
-            cmd = _prepare_image_clip(str(source), clip_path, seconds_each, vf=vf, framerate=ref_fps)
-        else:
-            cmd = _prepare_video_clip_range(str(source), clip_path, start_s, seconds_each, vf=vf)
+            raise UnsafeRenderCommandError(
+                f"Image inputs are not used for video render: {source.name}. Use photo curation for stills."
+            )
+        cmd = _prepare_video_clip_range(str(source), clip_path, start_s, seconds_each, vf=vf)
         logger.info("Render %s: encoding clip %d/%d from %s", job_id or "?", index + 1, n_clips, source.name)
         _run_cmd(cmd)
         prepared_raw.append(clip_path)
@@ -549,6 +519,21 @@ def create_render_job(
     for c in clip_inputs:
         aid = str(c.get("asset_id", ""))
         c["display_transpose"] = _transpose_from_tags(tag_by_asset.get(aid, []))
+
+    video_only: list[dict] = []
+    for c in clip_inputs:
+        aid = str(c.get("asset_id", ""))
+        asset = AssetRepository.get(aid) if aid else None
+        if asset is None:
+            continue
+        if asset.media_type != "video":
+            continue
+        video_only.append(c)
+    if not video_only:
+        raise UnsafeRenderCommandError(
+            "No video clips to render. Video previews use indexed video assets only; photos are curated separately."
+        )
+    clip_inputs = video_only
 
     input_files = [str(item.get("path", "")) for item in clip_inputs]
     output_dir = Path(settings.storage_root) / tenant_id / event_id / "renders"

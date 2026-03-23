@@ -71,4 +71,14 @@ describe("api client", () => {
       expect.any(Object)
     );
   });
+
+  it("builds photo curation and export URLs", () => {
+    const client = createApiClient({ baseUrl: "http://localhost:8000" });
+    expect(client.exportKeptPhotosUrl("event_x", "tenant_a")).toBe(
+      "http://localhost:8000/events/event_x/photos/export-kept?tenant_id=tenant_a"
+    );
+    expect(client.getAssetMediaUrl("event_x", "asset_y", "tenant_a")).toBe(
+      "http://localhost:8000/events/event_x/assets/asset_y/media?tenant_id=tenant_a"
+    );
+  });
 });

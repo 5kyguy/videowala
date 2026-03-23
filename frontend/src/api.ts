@@ -6,6 +6,7 @@ import type {
   Person,
   PersonFaceReferenceListItem,
   PersonReference,
+  PhotoCurationListResponse,
   PlannerPlan,
   RenderJob,
   RenderJobListItem,
@@ -198,7 +199,16 @@ export function createApiClient(config: ApiClientConfig) {
       );
     },
     getRenderVideoUrl: (renderJobId: string, tenantId: string) =>
-      `${baseUrl}/renders/${encodeURIComponent(renderJobId)}/video?tenant_id=${encodeURIComponent(tenantId)}`
+      `${baseUrl}/renders/${encodeURIComponent(renderJobId)}/video?tenant_id=${encodeURIComponent(tenantId)}`,
+    getPhotoCuration: (tenantId: string, eventId: string) =>
+      request<PhotoCurationListResponse>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}/photos/curation?tenant_id=${encodeURIComponent(tenantId)}`
+      ),
+    getAssetMediaUrl: (eventId: string, assetId: string, tenantId: string) =>
+      `${baseUrl}/events/${encodeURIComponent(eventId)}/assets/${encodeURIComponent(assetId)}/media?tenant_id=${encodeURIComponent(tenantId)}`,
+    exportKeptPhotosUrl: (eventId: string, tenantId: string) =>
+      `${baseUrl}/events/${encodeURIComponent(eventId)}/photos/export-kept?tenant_id=${encodeURIComponent(tenantId)}`
   };
 }
 

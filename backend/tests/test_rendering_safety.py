@@ -7,7 +7,7 @@ import pytest
 
 from app.db import now_utc, reset_database_for_tests
 from app.repositories import AssetRepository, EventRepository, next_id
-from app.schemas import Event, OutputType, PlannerAction, PlannerPlan
+from app.schemas import Asset, Event, OutputType, PlannerAction, PlannerPlan
 from app.services.rendering import (
     UnsafeRenderCommandError,
     build_ffmpeg_preview_command,
@@ -42,10 +42,48 @@ def test_unsafe_paths_are_rejected() -> None:
         )
 
 
+def test_create_render_job_rejects_image_only_selection() -> None:
+    EventRepository.create(
+        Event(
+            id="event_img",
+            tenant_id="tenant_a",
+            title="Image only",
+            event_type="test",
+            predefined_tags=[],
+            ocr_languages=["en"],
+            created_at=now_utc(),
+        )
+    )
+    img_id = next_id("asset")
+    AssetRepository.create(
+        Asset(
+            id=img_id,
+            tenant_id="tenant_a",
+            event_id="event_img",
+            media_path="media/x.jpg",
+            media_type="image",
+            created_at=now_utc(),
+        )
+    )
+    plan = PlannerPlan(
+        tenant_id="tenant_a",
+        event_id="event_img",
+        output_type=OutputType.highlight_reel,
+        rationale="test",
+        actions=[
+            PlannerAction(action="select_segments", params={"asset_ids": [img_id]}),
+            PlannerAction(action="set_order", params={"strategy": "ranked"}),
+            PlannerAction(action="set_duration", params={"seconds": 10}),
+            PlannerAction(action="render_preview", params={"format": "mp4"}),
+        ],
+    )
+    with pytest.raises(UnsafeRenderCommandError, match="No video clips"):
+        create_render_job("tenant_a", "event_img", plan)
+
+
 def test_render_job_execution_completes() -> None:
     if shutil.which("ffmpeg") is None:
         pytest.skip("ffmpeg is required for render execution test")
-    from app.schemas import Asset
 
     EventRepository.create(
         Event(
@@ -76,6 +114,7 @@ def test_render_job_execution_completes() -> None:
         rationale="test",
         actions=[
             PlannerAction(action="select_segments", params={"asset_ids": [asset_id]}),
+            PlannerAction(action="set_order", params={"strategy": "ranked"}),
             PlannerAction(action="set_duration", params={"seconds": 15}),
             PlannerAction(action="render_preview", params={"format": "mp4"}),
         ],

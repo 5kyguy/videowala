@@ -3,12 +3,13 @@ from __future__ import annotations
 import logging
 import mimetypes
 import sys
+import zipfile
 from pathlib import Path
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from ..config import settings
+from ..config import PROJECT_ROOT, settings
 from ..db import now_utc
 from ..repositories import (
     AssetRepository,
@@ -32,6 +33,7 @@ from ..schemas import (
     FeedbackUpdate,
     Person,
     PersonCreate,
+    PhotoCurationListResponse,
     PersonReference,
     PersonReferenceCreate,
     RenderJobList,
@@ -42,12 +44,56 @@ from ..services.indexing import get_event_context, get_event_context_filtered, r
 from ..services.search import semantic_search
 from ..services.planner import build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
-from ..services.rendering import UnsafeRenderCommandError, create_render_job
+from ..services.photo_curation import kept_photo_items_for_export, list_photo_curation_items
+from ..services.rendering import UnsafeRenderCommandError, create_render_job, validate_safe_path
 from ..workers.index_worker import submit_index_job, submit_render_job
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+
+_ALLOWED_EVENT_ASSET_IMAGE_SUFFIXES = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".gif",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".heic",
+    ".heif",
+}
+
+
+def _resolve_repo_media_path(raw: str) -> Path:
+    direct = Path(raw)
+    if direct.is_file():
+        return direct.resolve()
+    alt = _REPO_ROOT / raw
+    if alt.is_file():
+        return alt.resolve()
+    return direct
+
+
+def _allowed_media_file_roots() -> tuple[Path, Path]:
+    """Ingest may register repo-relative paths or files under tenant storage; block arbitrary filesystem reads."""
+    return (Path(settings.storage_root).resolve(), PROJECT_ROOT.resolve())
+
+
+def _media_path_is_allowed(path: Path) -> bool:
+    resolved = path.resolve()
+    return any(resolved == root or root in resolved.parents for root in _allowed_media_file_roots())
+
+
+def _assert_media_path_allowed(path: Path) -> None:
+    if not _media_path_is_allowed(path):
+        raise HTTPException(
+            status_code=400,
+            detail="Media file path is outside allowed directories (project root or configured storage).",
+        )
 
 
 def _assert_path_within_root(path: Path, root: Path) -> None:
@@ -385,6 +431,103 @@ def list_event_renders(event_id: str, tenant_id: str) -> RenderJobList:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     renders = RenderRepository.list_for_event(tenant_id=tenant_id, event_id=event_id)
     return RenderJobList(event_id=event_id, renders=renders)
+
+
+@router.get("/events/{event_id}/photos/curation", response_model=PhotoCurationListResponse)
+def get_photo_curation(event_id: str, tenant_id: str) -> PhotoCurationListResponse:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    items = list_photo_curation_items(event_id)
+    audit_action(tenant_id, event_id, "photo_curation_viewed", {"count": len(items)})
+    return PhotoCurationListResponse(event_id=event_id, items=items)
+
+
+@router.get("/events/{event_id}/assets/{asset_id}/media")
+def get_event_asset_media(event_id: str, asset_id: str, tenant_id: str) -> FileResponse:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    asset = AssetRepository.get(asset_id)
+    if asset is None or asset.event_id != event_id:
+        raise HTTPException(status_code=404, detail="Asset not found.")
+    if asset.media_type != "image":
+        raise HTTPException(status_code=400, detail="Only image assets can be served from this endpoint.")
+    try:
+        validate_safe_path(asset.media_path)
+    except UnsafeRenderCommandError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    path = _resolve_repo_media_path(asset.media_path)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Media file missing on disk.")
+    _assert_media_path_allowed(path)
+    ext = path.suffix.lower()
+    if ext not in _ALLOWED_EVENT_ASSET_IMAGE_SUFFIXES:
+        raise HTTPException(status_code=400, detail="Unsupported image extension for browser delivery.")
+    media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+    return FileResponse(path, media_type=media_type, filename=path.name)
+
+
+@router.get("/events/{event_id}/photos/export-kept")
+def export_kept_photos_zip(event_id: str, tenant_id: str) -> FileResponse:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    kept = kept_photo_items_for_export(event_id)
+    if not kept:
+        raise HTTPException(
+            status_code=400,
+            detail="No kept photos to export (need indexed images with keep=true and not duplicate).",
+        )
+    export_dir = Path(settings.scratch_root) / tenant_id / event_id / "exports"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = export_dir / f"kept_photos_{next_id('zip')}.zip"
+    added = 0
+    used_names: set[str] = set()
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for it in kept:
+            asset = AssetRepository.get(it.asset_id)
+            if asset is None or asset.media_type != "image":
+                continue
+            try:
+                validate_safe_path(asset.media_path)
+            except UnsafeRenderCommandError:
+                continue
+            src = _resolve_repo_media_path(asset.media_path)
+            if not src.is_file():
+                continue
+            if not _media_path_is_allowed(src):
+                continue
+            base = f"{it.asset_id}{src.suffix.lower() or '.jpg'}"
+            arcname = base
+            n = 0
+            while arcname in used_names:
+                n += 1
+                arcname = f"{it.asset_id}_{n}{src.suffix.lower() or '.jpg'}"
+            used_names.add(arcname)
+            zf.write(src, arcname=f"kept/{arcname}")
+            added += 1
+    if added == 0:
+        zip_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="Could not add any photo files to the archive.")
+    audit_action(tenant_id, event_id, "photo_export_kept", {"count": added})
+    return FileResponse(
+        zip_path,
+        media_type="application/zip",
+        filename="kept_photos.zip",
+    )
 
 
 @router.post("/requests/feedback/regenerate")

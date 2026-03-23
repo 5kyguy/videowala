@@ -7,9 +7,18 @@ import type {
   OutputType,
   Person,
   PersonFaceReferenceListItem,
+  PhotoCurationItem,
+  PhotoCurationListResponse,
   RenderJobListItem,
   VideoOrientation
 } from "./types";
+
+function partitionPhotoCuration(items: PhotoCurationItem[]) {
+  const kept = items.filter((i) => i.keep && !i.is_duplicate);
+  const duplicates = items.filter((i) => i.is_duplicate);
+  const rejected = items.filter((i) => !i.keep && !i.is_duplicate);
+  return { kept, duplicates, rejected };
+}
 
 const PROFILE_STORAGE_KEY = "videowala_profiles";
 const DEFAULT_OUTPUT_TYPE: OutputType = "highlight_reel";
@@ -50,6 +59,13 @@ export default function App() {
   const [selectedRenderJobId, setSelectedRenderJobId] = useState<string | null>(null);
   const [persons, setPersons] = useState<Person[]>([]);
   const [faceRefs, setFaceRefs] = useState<PersonFaceReferenceListItem[]>([]);
+  const [photoCuration, setPhotoCuration] = useState<PhotoCurationListResponse | null>(null);
+  const [photoGalleryBusy, setPhotoGalleryBusy] = useState(false);
+
+  const photoParts = useMemo(
+    () => partitionPhotoCuration(photoCuration?.items ?? []),
+    [photoCuration?.items]
+  );
 
   const [eventTitle, setEventTitle] = useState("wedding1");
   const [eventType, setEventType] = useState("wedding");
@@ -95,9 +111,11 @@ export default function App() {
       setRenders([]);
       setPersons([]);
       setFaceRefs([]);
+      setPhotoCuration(null);
       setSelectedRenderJobId(null);
       return;
     }
+    setPhotoCuration(null);
     setSelectedRenderJobId(null);
     void refreshSelectedEvent();
   }, [selectedEventId, tenantId, apiBaseUrl]);
@@ -209,16 +227,18 @@ export default function App() {
     ) {
       return;
     }
-    const [eventSummary, eventRenders, personsRes, refsRes] = await Promise.all([
+    const [eventSummary, eventRenders, personsRes, refsRes, photoRes] = await Promise.all([
       api.getEventSummary(tenantId, selectedEventId),
       api.listEventRenders(tenantId, selectedEventId),
       api.listPersons(tenantId, selectedEventId),
-      api.listEventPersonReferences(tenantId, selectedEventId)
+      api.listEventPersonReferences(tenantId, selectedEventId),
+      api.getPhotoCuration(tenantId, selectedEventId)
     ]);
     setSummary(eventSummary);
     setRenders(eventRenders.renders);
     setPersons(personsRes.persons);
     setFaceRefs(refsRes.references);
+    setPhotoCuration(photoRes);
     setStatus(`Loaded dashboard for ${selectedEventId}.`);
   }
 
@@ -233,6 +253,21 @@ export default function App() {
     await runAction(async () => {
       await loadEventDashboard();
     });
+  }
+
+  async function refreshPhotoCuration() {
+    if (!selectedEventId) return;
+    setPhotoGalleryBusy(true);
+    setErrorMessage("");
+    try {
+      const res = await api.getPhotoCuration(tenantId, selectedEventId);
+      setPhotoCuration(res);
+      setStatus(`Photo curation: ${res.items.length} indexed image(s).`);
+    } catch (error) {
+      setErrorMessage(asErrorMessage(error));
+    } finally {
+      setPhotoGalleryBusy(false);
+    }
   }
 
   async function handleCreateEvent(e: FormEvent) {
@@ -344,7 +379,7 @@ export default function App() {
         include_faces: [],
         include_asset_ids: parseIdList(includeAssetIds),
         excluded_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
+        include_media_types: ["video"],
         video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
@@ -367,7 +402,7 @@ export default function App() {
         include_faces: [],
         include_asset_ids: parseIdList(includeAssetIds),
         excluded_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
+        include_media_types: ["video"],
         video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
@@ -391,7 +426,7 @@ export default function App() {
         target_duration_seconds: durationSeconds,
         include_asset_ids: parseIdList(includeAssetIds),
         exclude_asset_ids: parseIdList(excludeAssetIds),
-        include_media_types: [],
+        include_media_types: ["video"],
         video_orientation: videoOrientation
       });
       setPlanPreviewJson(JSON.stringify(response.plan, null, 2));
@@ -532,7 +567,7 @@ export default function App() {
           <section className="card">
             <h2>Ingest media</h2>
             <p className="muted">
-              Path must be relative to the backend project root (/home/lampros/videowala/). Accepts both files and folders.
+              Paths are resolved on the machine running the backend: use an absolute path, or a path relative to the Videowala repository root. Files or folders are accepted.
             </p>
             <div className="workflow-grid">
               <label>
@@ -549,6 +584,99 @@ export default function App() {
               </button>
             </div>
             {ingestNote ? <p className="pipeline-note">{ingestNote}</p> : null}
+          </section>
+
+          <section className="card photo-curation-card">
+            <h2>Photo curation</h2>
+            <p className="muted">
+              Indexed stills are scored for duplicates and weak takes. Use this gallery to review picks; exports include
+              <strong> kept</strong> images only (not duplicates). Video reels and films use <strong>video clips only</strong>—see
+              the next section.
+            </p>
+            <div className="photo-curation-toolbar">
+              <button
+                type="button"
+                onClick={() => void refreshPhotoCuration()}
+                disabled={!selectedEventId || photoGalleryBusy}
+              >
+                {photoGalleryBusy ? "Refreshing…" : "Refresh picks"}
+              </button>
+              {selectedEventId ? (
+                <a
+                  className="button-link"
+                  href={api.exportKeptPhotosUrl(selectedEventId, tenantId)}
+                  download="kept_photos.zip"
+                >
+                  Download kept photos (ZIP)
+                </a>
+              ) : null}
+            </div>
+            {!selectedEventId ? (
+              <p className="muted">Select an event to load photo picks.</p>
+            ) : photoCuration && photoCuration.items.length === 0 ? (
+              <p className="muted">No indexed images for this event yet.</p>
+            ) : photoCuration ? (
+              <div className="photo-curation-panels">
+                <div className="photo-curation-panel">
+                  <h3>Kept ({photoParts.kept.length})</h3>
+                  <div className="photo-curation-grid">
+                    {photoParts.kept.map((item) => (
+                      <figure key={item.segment_id} className="photo-curation-thumb">
+                        <img
+                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                          alt=""
+                          loading="lazy"
+                        />
+                        <figcaption>
+                          <code>{item.asset_id}</code>
+                          <span className="muted"> · score {item.score.toFixed(2)}</span>
+                        </figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </div>
+                <div className="photo-curation-panel">
+                  <h3>Duplicates ({photoParts.duplicates.length})</h3>
+                  <div className="photo-curation-grid">
+                    {photoParts.duplicates.map((item) => (
+                      <figure key={item.segment_id} className="photo-curation-thumb is-dim">
+                        <img
+                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                          alt=""
+                          loading="lazy"
+                        />
+                        <figcaption>
+                          <code>{item.asset_id}</code>
+                          <span className="muted"> · dup</span>
+                        </figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </div>
+                <div className="photo-curation-panel">
+                  <h3>Rejected / low score ({photoParts.rejected.length})</h3>
+                  <div className="photo-curation-grid">
+                    {photoParts.rejected.map((item) => (
+                      <figure key={item.segment_id} className="photo-curation-thumb is-dim">
+                        <img
+                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                          alt=""
+                          loading="lazy"
+                        />
+                        <figcaption>
+                          <code>{item.asset_id}</code>
+                          {item.reject_reasons.length > 0 ? (
+                            <span className="muted"> · {item.reject_reasons.join(", ")}</span>
+                          ) : null}
+                        </figcaption>
+                      </figure>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="muted">Loading photo picks…</p>
+            )}
           </section>
 
           <section className="card">
@@ -653,9 +781,10 @@ export default function App() {
           </section>
 
           <section className="card">
-            <h2>Plan + render</h2>
+            <h2>Video plan + render</h2>
             <p className="muted">
-              Use the planner to create a plan for the render. Then use the render button to render the video. Render can be used straight away or you can regenerate the plan and render again.
+              Planner and render use <strong>video assets only</strong> (still photos are not stitched into the MP4). Create a
+              plan, then render or regenerate. Orientation is a center crop on source resolution—no subtitle burn-in.
             </p>
             <div className="workflow-grid">
               <label className="span-2">
