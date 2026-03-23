@@ -484,6 +484,8 @@ def create_render_job(
             seg = SegmentRepository.get(seg_id)
             if seg is None:
                 continue
+            if not seg.keep:
+                continue
             asset = AssetRepository.get(seg.asset_id)
             if asset is None:
                 continue

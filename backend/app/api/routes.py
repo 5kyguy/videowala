@@ -35,6 +35,7 @@ from ..schemas import (
     Person,
     PersonCreate,
     PhotoCurationListResponse,
+    PhotoCurationRequest,
     PersonReference,
     PersonReferenceCreate,
     RenderJobList,
@@ -45,7 +46,7 @@ from ..services.indexing import get_event_context, get_event_context_filtered, r
 from ..services.search import semantic_search
 from ..services.planner import build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
-from ..services.photo_curation import kept_photo_items_for_export, list_photo_curation_items
+from ..services.photo_curation import kept_photo_items_for_export, list_photo_curation_items, score_photo_segments
 from ..services.rendering import UnsafeRenderCommandError, create_render_job, validate_safe_path
 from ..workers.index_worker import submit_index_job, submit_render_job
 
@@ -500,6 +501,27 @@ def get_photo_curation(event_id: str, tenant_id: str) -> PhotoCurationListRespon
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     items = list_photo_curation_items(event_id)
     audit_action(tenant_id, event_id, "photo_curation_viewed", {"count": len(items)})
+    return PhotoCurationListResponse(event_id=event_id, items=items)
+
+
+@router.post("/events/{event_id}/photos/curation", response_model=PhotoCurationListResponse)
+def run_photo_curation(event_id: str, payload: PhotoCurationRequest) -> PhotoCurationListResponse:
+    if payload.event_id != event_id:
+        raise HTTPException(status_code=400, detail="event_id in path must match body.")
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(payload.tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    items = score_photo_segments(payload)
+    audit_action(
+        payload.tenant_id,
+        event_id,
+        "photo_curation_run",
+        {"prompt": payload.prompt, "cull_percent": payload.cull_percent, "count": len(items)},
+    )
     return PhotoCurationListResponse(event_id=event_id, items=items)
 
 

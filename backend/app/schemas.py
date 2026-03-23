@@ -261,6 +261,19 @@ class FeedbackUpdate(BaseModel):
         return self
 
 
+class PhotoCurationRequest(BaseModel):
+    tenant_id: str
+    event_id: str
+    prompt: str = Field(min_length=5, description="What is this album for? Describe the purpose or theme.")
+    cull_percent: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        description="Target fraction to keep (0.5 = keep best 50%%).",
+    )
+    include_faces: list[str] = Field(default_factory=list)
+
+
 class PhotoCurationItem(BaseModel):
     asset_id: str
     segment_id: str

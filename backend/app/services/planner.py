@@ -196,7 +196,7 @@ def _score_segments(
         if prev is None or final_score > prev[1]:
             signature_top[signature] = (seg.id, final_score)
 
-        keep = final_score >= 0.35 and not is_dup
+        keep = final_score >= 0.55 and not is_dup
         reasons: list[str] = []
         if is_dup:
             reasons.append("duplicate_candidate")
@@ -295,7 +295,10 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
     include_first = [asset_id for asset_id in request.include_asset_ids if asset_id in dedup_ids]
     remaining = [asset_id for asset_id in dedup_ids if asset_id not in include_first]
     dedup_ids = (include_first + remaining)[:30]
-    ranked_segment_ids = ranked_segment_ids[:80]
+
+    dedup_ids_set = set(dedup_ids)
+    filtered_segments = [row for row in ranked_segments if row["asset_id"] in dedup_ids_set]
+    ranked_segment_ids = [row["segment_id"] for row in filtered_segments[:80]]
 
     order_strategy = _set_order_strategy(request.output_type)
     rationale = (

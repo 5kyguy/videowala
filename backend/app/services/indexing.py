@@ -87,7 +87,7 @@ def _base_cull_score(
     if ocr_items:
         score += 0.05
     if asset.media_type == "image":
-        score -= 0.03
+        score -= 0.10
     if caption_confidence is not None:
         score += 0.05 * max(0.0, min(1.0, caption_confidence))
     neg = {"blur", "blurry", "dark", "underexposed", "noisy", "noise"}
