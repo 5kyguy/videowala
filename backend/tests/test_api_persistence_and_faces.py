@@ -5,6 +5,9 @@ from fastapi.testclient import TestClient
 from app.config import settings
 from app.db import reset_database_for_tests
 from app.main import app
+from app.db import now_utc
+from app.repositories import RenderRepository
+from app.schemas import RenderJob
 
 
 def setup_function() -> None:
@@ -150,3 +153,49 @@ def test_event_summary_and_render_list_reject_cross_tenant_access() -> None:
 
     renders_resp = client.get(f"/events/{event_id}/renders", params={"tenant_id": "tenant_b"})
     assert renders_resp.status_code == 403
+
+
+def test_delete_event_endpoint_removes_event() -> None:
+    client = TestClient(app)
+    event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Delete me", "event_type": "party"}).json()
+    event_id = event["id"]
+
+    deleted = client.delete(f"/events/{event_id}", params={"tenant_id": "tenant_a"})
+    assert deleted.status_code == 200
+    assert deleted.json()["status"] == "deleted"
+
+    listed = client.get("/events", params={"tenant_id": "tenant_a"})
+    assert listed.status_code == 200
+    ids = [item["id"] for item in listed.json()["events"]]
+    assert event_id not in ids
+
+
+def test_delete_render_endpoint_removes_render_job() -> None:
+    client = TestClient(app)
+    event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Render delete", "event_type": "party"}).json()
+    event_id = event["id"]
+    render_job = RenderJob(
+        id="render_test_delete_1",
+        tenant_id="tenant_a",
+        event_id=event_id,
+        plan_id="plan_test",
+        status="queued",
+        output_path=None,
+        progress_percent=0,
+        error_message=None,
+        created_at=now_utc(),
+    )
+    RenderRepository.create(
+        render_job,
+        input_files=[],
+        duration_seconds=30,
+        scratch_dir="tmp/test-render-delete",
+    )
+    render_job_id = render_job.id
+
+    deleted = client.delete(f"/renders/{render_job_id}", params={"tenant_id": "tenant_a"})
+    assert deleted.status_code == 200
+    assert deleted.json()["status"] == "deleted"
+
+    fetch = client.get(f"/renders/{render_job_id}", params={"tenant_id": "tenant_a"})
+    assert fetch.status_code == 404

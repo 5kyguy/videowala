@@ -61,6 +61,8 @@ export default function App() {
   const [faceRefs, setFaceRefs] = useState<PersonFaceReferenceListItem[]>([]);
   const [photoCuration, setPhotoCuration] = useState<PhotoCurationListResponse | null>(null);
   const [photoGalleryBusy, setPhotoGalleryBusy] = useState(false);
+  const [activePage, setActivePage] = useState<"dashboard" | "album">("dashboard");
+  const [albumSectionFilter, setAlbumSectionFilter] = useState<"all" | "kept" | "duplicates" | "rejected">("all");
 
   const photoParts = useMemo(
     () => partitionPhotoCuration(photoCuration?.items ?? []),
@@ -290,6 +292,22 @@ export default function App() {
     });
   }
 
+  async function handleDeleteEvent(eventId: string) {
+    if (!window.confirm(`Delete event ${eventId}? This removes assets, insights, and render history.`)) {
+      return;
+    }
+    await runAction(async () => {
+      await api.deleteEvent(eventId, tenantId);
+      if (selectedEventId === eventId) {
+        setSelectedEventId("");
+        setPhotoCuration(null);
+        setSelectedRenderJobId(null);
+      }
+      await refreshEvents();
+      setStatus(`Deleted event ${eventId}.`);
+    });
+  }
+
   async function handleIngest() {
     if (!selectedEventId || !ingestPath.trim()) {
       setErrorMessage("Select an event and enter a path (file or folder on the backend host).");
@@ -436,10 +454,31 @@ export default function App() {
     });
   }
 
+  async function handleDeleteRender(renderJobId: string) {
+    if (!window.confirm(`Delete render ${renderJobId}? This also removes generated files.`)) return;
+    await runAction(async () => {
+      await api.deleteRenderJob(renderJobId, tenantId);
+      if (selectedRenderJobId === renderJobId) {
+        setSelectedRenderJobId(null);
+      }
+      if (selectedEventId) {
+        const eventRenders = await api.listEventRenders(tenantId, selectedEventId);
+        setRenders(eventRenders.renders);
+      }
+      setStatus(`Deleted render ${renderJobId}.`);
+    });
+  }
+
   const selectedEvent = events.find((event) => event.id === selectedEventId) ?? null;
   const selectedRenderJob = selectedRenderJobId
     ? renders.find((r) => r.id === selectedRenderJobId) ?? null
     : null;
+
+  const albumSectionVisible = {
+    kept: albumSectionFilter === "all" || albumSectionFilter === "kept",
+    duplicates: albumSectionFilter === "all" || albumSectionFilter === "duplicates",
+    rejected: albumSectionFilter === "all" || albumSectionFilter === "rejected"
+  };
 
   return (
     <div className="page">
@@ -497,21 +536,149 @@ export default function App() {
           </form>
           <div className="events-list">
             {events.map((event) => (
-              <button
-                key={event.id}
-                className={event.id === selectedEventId ? "event-item active" : "event-item"}
-                onClick={() => setSelectedEventId(event.id)}
-                disabled={loading}
-              >
-                <strong>{event.title}</strong>
-                <span>{event.event_type}</span>
-              </button>
+              <div key={event.id} className={event.id === selectedEventId ? "event-item active" : "event-item"}>
+                <button type="button" className="event-item-select" onClick={() => setSelectedEventId(event.id)} disabled={loading}>
+                  <strong>{event.title}</strong>
+                  <span>{event.event_type}</span>
+                </button>
+                <button
+                  type="button"
+                  className="danger-button"
+                  onClick={() => void handleDeleteEvent(event.id)}
+                  disabled={loading}
+                >
+                  Delete
+                </button>
+              </div>
             ))}
             {events.length === 0 ? <p className="muted">No events for this profile yet.</p> : null}
           </div>
         </aside>
 
         <main className="main-pane">
+          {activePage === "album" ? (
+            <section className="card photo-album-page">
+              <div className="photo-album-header">
+                <div>
+                  <h2>Photo album</h2>
+                  <p className="muted">
+                    Review curated images in a dedicated page view. Use filters to focus each bucket.
+                  </p>
+                </div>
+                <div className="button-row">
+                  <button type="button" onClick={() => setActivePage("dashboard")}>
+                    Back to dashboard
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void refreshPhotoCuration()}
+                    disabled={!selectedEventId || photoGalleryBusy}
+                  >
+                    {photoGalleryBusy ? "Refreshing…" : "Refresh picks"}
+                  </button>
+                  {selectedEventId ? (
+                    <a
+                      className="button-link"
+                      href={api.exportKeptPhotosUrl(selectedEventId, tenantId)}
+                      download="kept_photos.zip"
+                    >
+                      Download kept photos (ZIP)
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+              <div className="workflow-grid">
+                <label>
+                  Show section
+                  <select
+                    value={albumSectionFilter}
+                    onChange={(e) =>
+                      setAlbumSectionFilter(e.target.value as "all" | "kept" | "duplicates" | "rejected")
+                    }
+                  >
+                    <option value="all">All</option>
+                    <option value="kept">Kept only</option>
+                    <option value="duplicates">Duplicates only</option>
+                    <option value="rejected">Rejected only</option>
+                  </select>
+                </label>
+              </div>
+              {!selectedEventId ? (
+                <p className="muted">Select an event to load album images.</p>
+              ) : photoCuration && photoCuration.items.length === 0 ? (
+                <p className="muted">No indexed images for this event yet.</p>
+              ) : photoCuration ? (
+                <div className="photo-curation-panels">
+                  {albumSectionVisible.kept ? (
+                    <div className="photo-curation-panel">
+                      <h3>Kept ({photoParts.kept.length})</h3>
+                      <div className="photo-curation-grid">
+                        {photoParts.kept.map((item) => (
+                          <figure key={item.segment_id} className="photo-curation-thumb">
+                            <img
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              alt=""
+                              loading="lazy"
+                            />
+                            <figcaption>
+                              <code>{item.asset_id}</code>
+                              <span className="muted"> · score {item.score.toFixed(2)}</span>
+                            </figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {albumSectionVisible.duplicates ? (
+                    <div className="photo-curation-panel">
+                      <h3>Duplicates ({photoParts.duplicates.length})</h3>
+                      <div className="photo-curation-grid">
+                        {photoParts.duplicates.map((item) => (
+                          <figure key={item.segment_id} className="photo-curation-thumb is-dim">
+                            <img
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              alt=""
+                              loading="lazy"
+                            />
+                            <figcaption>
+                              <code>{item.asset_id}</code>
+                              <span className="muted"> · dup</span>
+                            </figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {albumSectionVisible.rejected ? (
+                    <div className="photo-curation-panel">
+                      <h3>Rejected / low score ({photoParts.rejected.length})</h3>
+                      <div className="photo-curation-grid">
+                        {photoParts.rejected.map((item) => (
+                          <figure key={item.segment_id} className="photo-curation-thumb is-dim">
+                            <img
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              alt=""
+                              loading="lazy"
+                            />
+                            <figcaption>
+                              <code>{item.asset_id}</code>
+                              {item.reject_reasons.length > 0 ? (
+                                <span className="muted"> · {item.reject_reasons.join(", ")}</span>
+                              ) : null}
+                            </figcaption>
+                          </figure>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="muted">Loading photo picks…</p>
+              )}
+            </section>
+          ) : null}
+          {activePage === "dashboard" ? (
+            <>
           <section className="card">
             <h2>Event Summary</h2>
             {selectedEvent ? (
@@ -610,6 +777,9 @@ export default function App() {
                   Download kept photos (ZIP)
                 </a>
               ) : null}
+              <button type="button" onClick={() => setActivePage("album")} disabled={!selectedEventId}>
+                Open album page
+              </button>
             </div>
             {!selectedEventId ? (
               <p className="muted">Select an event to load photo picks.</p>
@@ -888,16 +1058,41 @@ export default function App() {
                       </p>
                     </button>
                     {job.status === "completed" ? (
-                      <a
-                        className="render-open-tab"
-                        href={api.getRenderVideoUrl(job.id, tenantId)}
-                        target="_blank"
-                        rel="noreferrer"
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        Open in new tab
-                      </a>
-                    ) : null}
+                      <div className="button-row" style={{ padding: "10px" }}>
+                        <a
+                          className="render-open-tab"
+                          href={api.getRenderVideoUrl(job.id, tenantId)}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          Open in new tab
+                        </a>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDeleteRender(job.id);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="button-row" style={{ padding: "10px" }}>
+                        <button
+                          type="button"
+                          className="danger-button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleDeleteRender(job.id);
+                          }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    )}
                   </article>
                 ))}
               </div>
@@ -941,6 +1136,8 @@ export default function App() {
               </div>
             </div>
           </section>
+            </>
+          ) : null}
         </main>
       </section>
 

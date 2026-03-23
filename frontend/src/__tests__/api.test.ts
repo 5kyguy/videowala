@@ -81,4 +81,25 @@ describe("api client", () => {
       "http://localhost:8000/events/event_x/assets/asset_y/media?tenant_id=tenant_a"
     );
   });
+
+  it("calls delete endpoints with tenant scope", async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify({ status: "deleted" })
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = createApiClient({ baseUrl: "http://localhost:8000" });
+    await client.deleteEvent("event_1", "tenant_a");
+    await client.deleteRenderJob("render_1", "tenant_a");
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://localhost:8000/events/event_1?tenant_id=tenant_a",
+      expect.objectContaining({ method: "DELETE" })
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://localhost:8000/renders/render_1?tenant_id=tenant_a",
+      expect.objectContaining({ method: "DELETE" })
+    );
+  });
 });

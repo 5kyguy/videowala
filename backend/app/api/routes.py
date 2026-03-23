@@ -5,6 +5,7 @@ import mimetypes
 import sys
 import zipfile
 from pathlib import Path
+import shutil
 
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -165,6 +166,33 @@ def patch_event(event_id: str, payload: EventUpdate, tenant_id: str) -> Event:
 def list_events(tenant_id: str) -> dict:
     events = EventRepository.list_for_tenant(tenant_id=tenant_id)
     return {"events": [event.model_dump() for event in events]}
+
+
+@router.delete("/events/{event_id}")
+def delete_event(event_id: str, tenant_id: str) -> dict:
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise HTTPException(status_code=404, detail="Event not found.")
+    try:
+        assert_tenant_scope(tenant_id, event.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    storage_dir = Path(settings.storage_root) / tenant_id / event_id
+    scratch_dir = Path(settings.scratch_root) / tenant_id / event_id
+
+    deleted = EventRepository.delete(event_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Event not found.")
+
+    # Best-effort cleanup for event-scoped files; DB delete already succeeded.
+    if storage_dir.exists():
+        shutil.rmtree(storage_dir, ignore_errors=True)
+    if scratch_dir.exists():
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    audit_action(tenant_id, event_id, "event_deleted", {})
+    return {"status": "deleted", "event_id": event_id}
 
 
 @router.post("/assets")
@@ -418,6 +446,34 @@ def get_render_job(render_job_id: str, tenant_id: str) -> dict:
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"render_job": job.model_dump()}
+
+
+@router.delete("/renders/{render_job_id}")
+def delete_render_job(render_job_id: str, tenant_id: str) -> dict:
+    job = RenderRepository.get(render_job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Render job not found.")
+    try:
+        assert_tenant_scope(tenant_id, job.tenant_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    output_path = Path(job.output_path) if job.output_path else None
+    spec = RenderRepository.get_spec(render_job_id)
+    scratch_dir = Path(spec["scratch_dir"]) if spec and spec.get("scratch_dir") else None
+
+    deleted = RenderRepository.delete(render_job_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Render job not found.")
+
+    # Best-effort cleanup for generated render files.
+    if output_path and output_path.exists():
+        output_path.unlink(missing_ok=True)
+    if scratch_dir and scratch_dir.exists():
+        shutil.rmtree(scratch_dir, ignore_errors=True)
+
+    audit_action(tenant_id, job.event_id, "render_deleted", {"render_job_id": render_job_id})
+    return {"status": "deleted", "render_job_id": render_job_id}
 
 
 @router.get("/events/{event_id}/renders", response_model=RenderJobList)

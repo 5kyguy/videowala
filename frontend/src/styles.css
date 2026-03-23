@@ -155,13 +155,29 @@ button:disabled {
 
 .event-item {
   text-align: left;
-  display: grid;
-  gap: 4px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  background: #0f172a;
 }
 
 .event-item.active {
   border-color: #22d3ee;
   box-shadow: 0 0 0 1px #22d3ee inset;
+}
+
+.event-item-select {
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+  flex: 1;
 }
 
 .stats-grid {
@@ -390,6 +406,29 @@ footer {
   text-decoration: none;
   font-size: 14px;
   background: rgba(56, 189, 248, 0.08);
+}
+
+.danger-button {
+  border-color: #dc2626;
+  color: #fecaca;
+  background: rgba(220, 38, 38, 0.15);
+}
+
+.danger-button:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.25);
+}
+
+.photo-album-page {
+  display: grid;
+  gap: 12px;
+}
+
+.photo-album-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .photo-curation-toolbar .button-link:hover {

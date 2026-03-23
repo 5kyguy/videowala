@@ -81,6 +81,12 @@ export function createApiClient(config: ApiClientConfig) {
       venue?: string;
       date?: string;
     }) => request<Event>(baseUrl, "/events", { method: "POST", body: JSON.stringify(payload) }),
+    deleteEvent: (eventId: string, tenantId: string) =>
+      request<{ status: string; event_id: string }>(
+        baseUrl,
+        `/events/${encodeURIComponent(eventId)}?tenant_id=${encodeURIComponent(tenantId)}`,
+        { method: "DELETE" }
+      ),
     ingestAsset: (payload: {
       tenant_id: string;
       event_id: string;
@@ -200,6 +206,12 @@ export function createApiClient(config: ApiClientConfig) {
     },
     getRenderVideoUrl: (renderJobId: string, tenantId: string) =>
       `${baseUrl}/renders/${encodeURIComponent(renderJobId)}/video?tenant_id=${encodeURIComponent(tenantId)}`,
+    deleteRenderJob: (renderJobId: string, tenantId: string) =>
+      request<{ status: string; render_job_id: string }>(
+        baseUrl,
+        `/renders/${encodeURIComponent(renderJobId)}?tenant_id=${encodeURIComponent(tenantId)}`,
+        { method: "DELETE" }
+      ),
     getPhotoCuration: (tenantId: string, eventId: string) =>
       request<PhotoCurationListResponse>(
         baseUrl,

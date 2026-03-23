@@ -131,6 +131,12 @@ class EventRepository:
             )
         return EventRepository.get(event_id)
 
+    @staticmethod
+    def delete(event_id: str) -> bool:
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM events WHERE id = ?", (event_id,))
+            return cur.rowcount > 0
+
 
 class AssetRepository:
     @staticmethod
@@ -651,6 +657,12 @@ class RenderRepository:
                     (reason, row["id"]),
                 )
             return len(rows)
+
+    @staticmethod
+    def delete(job_id: str) -> bool:
+        with db_cursor() as cur:
+            cur.execute("DELETE FROM render_jobs WHERE id = ?", (job_id,))
+            return cur.rowcount > 0
 
 
 class IndexJobRepository:
