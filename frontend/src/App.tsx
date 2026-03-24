@@ -790,12 +790,14 @@ export default function App() {
               <p className="muted">Select an event to load photo picks.</p>
             ) : photoCuration && photoCuration.items.length === 0 ? (
               <p className="muted">No indexed images for this event yet.</p>
-            ) : (
+            ) : photoCuration ? (
               <p className="muted">
-                {photoCuration!.items.length} indexed image(s). Use{" "}
+                {photoCuration.items.length} indexed image(s). Use{" "}
                 <strong>Open album page</strong> to review them — opening the album page fetches images and
                 consumes server bandwidth, similar to downloading the ZIP.
               </p>
+            ) : (
+              <p className="muted">Loading photo picks…</p>
             )}
           </section>
 
