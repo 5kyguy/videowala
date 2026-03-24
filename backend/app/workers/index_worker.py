@@ -87,6 +87,13 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
                 IndexJobRepository.mark_completed(job.id, count)
                 _emit_indexing_progress_log(asset.event_id)
             except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Index job failed job_id=%s asset_id=%s event_id=%s: %s",
+                    job.id,
+                    asset.id,
+                    asset.event_id,
+                    exc,
+                )
                 IndexJobRepository.mark_failed(job.id, str(exc))
                 _emit_indexing_progress_log(asset.event_id)
             finally:

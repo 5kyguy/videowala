@@ -735,6 +735,37 @@ class IndexJobRepository:
         return counts
 
     @staticmethod
+    def sum_index_job_duration_seconds(event_id: str) -> tuple[float, int]:
+        """
+        Sum (finished_at - started_at) for terminal jobs that have both timestamps.
+        Returns (total_seconds, job_count).
+        """
+        with db_cursor() as cur:
+            rows = cur.execute(
+                """
+                SELECT started_at, finished_at FROM index_jobs
+                WHERE event_id = ?
+                  AND status IN ('completed', 'failed')
+                  AND started_at IS NOT NULL
+                  AND finished_at IS NOT NULL
+                """,
+                (event_id,),
+            ).fetchall()
+        total = 0.0
+        n = 0
+        for row in rows:
+            try:
+                t0 = from_iso(row["started_at"])
+                t1 = from_iso(row["finished_at"])
+                delta = (t1 - t0).total_seconds()
+                if delta >= 0:
+                    total += delta
+                    n += 1
+            except Exception:
+                continue
+        return total, n
+
+    @staticmethod
     def mark_running(job_id: str) -> None:
         with db_cursor() as cur:
             cur.execute(

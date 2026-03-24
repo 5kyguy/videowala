@@ -296,6 +296,11 @@ class PhotoCurationListResponse(BaseModel):
     items: list[PhotoCurationItem]
 
 
+class MediaExtensionCount(BaseModel):
+    extension: str
+    count: int
+
+
 class EventSummaryStats(BaseModel):
     assets_total: int
     images_total: int
@@ -316,6 +321,19 @@ class EventSummaryStats(BaseModel):
     index_jobs_running: int
     index_jobs_completed: int
     index_jobs_failed: int
+    # On-disk source media (resolved paths under project root or absolute)
+    media_storage_bytes: int = 0
+    media_storage_files_found: int = 0
+    media_storage_files_missing: int = 0
+    media_bytes_images: int = 0
+    media_bytes_videos: int = 0
+    # Completed render output files (MP4s under storage)
+    renders_storage_bytes: int = 0
+    # Wall time spent in index jobs (sum of finished - started for terminal jobs)
+    index_duration_seconds_total: float = 0.0
+    index_duration_job_count: int = 0
+    # Top file extensions by asset count (composition)
+    media_extension_top: list[MediaExtensionCount] = Field(default_factory=list)
 
 
 class EventSummary(BaseModel):

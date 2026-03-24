@@ -70,6 +70,11 @@ export type RenderJob = {
   planner_prompt?: string | null;
 };
 
+export type MediaExtensionCount = {
+  extension: string;
+  count: number;
+};
+
 export type EventSummaryStats = {
   assets_total: number;
   images_total: number;
@@ -90,6 +95,18 @@ export type EventSummaryStats = {
   index_jobs_running: number;
   index_jobs_completed: number;
   index_jobs_failed: number;
+  /** Bytes on disk for resolved source files */
+  media_storage_bytes: number;
+  media_storage_files_found: number;
+  media_storage_files_missing: number;
+  media_bytes_images: number;
+  media_bytes_videos: number;
+  /** Bytes for completed render MP4 outputs */
+  renders_storage_bytes: number;
+  /** Sum of (finished − started) for terminal index jobs */
+  index_duration_seconds_total: number;
+  index_duration_job_count: number;
+  media_extension_top: MediaExtensionCount[];
 };
 
 export type EventSummary = {

@@ -39,6 +39,9 @@ curl -s -X POST http://localhost:8000/events \
 Event dashboard summary response includes:
 
 - media totals (`assets_total`, image/video split, `has_media`)
+- **resource footprint**: `media_storage_bytes` and per-type `media_bytes_images` / `media_bytes_videos` from files the backend can resolve on disk; `media_storage_files_found` / `media_storage_files_missing`; `media_extension_top` (top extensions by asset count)
+- **index timing**: `index_duration_seconds_total` and `index_duration_job_count` — sum of `(finished_at − started_at)` over completed/failed index jobs with both timestamps
+- **render storage**: `renders_storage_bytes` — size of completed render output files
 - face readiness (`persons_total`, `face_references_total`, `faces_saved`, face-match counters)
 - render status counters (`renders_total`, queued/running/completed/failed)
 

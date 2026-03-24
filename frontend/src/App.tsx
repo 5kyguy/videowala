@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import { ApiError, createApiClient, getDefaultApiBaseUrl } from "./api";
+import { formatBytes, formatDurationSeconds } from "./format";
 import type {
   Event,
   EventSummary,
@@ -699,12 +700,16 @@ export default function App() {
                   <strong>{selectedEvent.title}</strong> ({selectedEvent.event_type}) - <code>{selectedEvent.id}</code>
                 </p>
                 {summary ? (
+                  <>
                   <div className="stats-grid">
                     <div className="stat-card">
                       <h3>Media</h3>
                       <p>{summary.stats.assets_total} assets</p>
                       <p className="muted">
                         {summary.stats.images_total} images / {summary.stats.videos_total} videos
+                      </p>
+                      <p className="muted stat-highlight">
+                        {formatBytes(summary.stats.media_storage_bytes)} on disk
                       </p>
                     </div>
                     <div className="stat-card">
@@ -717,12 +722,17 @@ export default function App() {
                     <div className="stat-card">
                       <h3>Indexing</h3>
                       <p>
-                        {summary.stats.index_jobs_completed + summary.stats.index_jobs_failed} /{" "}
-                        {summary.stats.index_jobs_total || summary.stats.assets_total} assets indexed
+                        {summary.stats.index_jobs_completed} /{" "}
+                        {summary.stats.index_jobs_total || summary.stats.assets_total} index jobs succeeded
                       </p>
                       <p className="muted">
                         {summary.stats.index_jobs_queued} queued, {summary.stats.index_jobs_running} running,{" "}
                         {summary.stats.index_jobs_failed} failed
+                      </p>
+                      <p className="muted stat-highlight">
+                        {summary.stats.index_duration_job_count > 0
+                          ? `${formatDurationSeconds(summary.stats.index_duration_seconds_total)} total job time (${summary.stats.index_duration_job_count} jobs)`
+                          : "No finished index timing yet"}
                       </p>
                     </div>
                     <div className="stat-card">
@@ -732,8 +742,66 @@ export default function App() {
                         {summary.stats.renders_completed} done, {summary.stats.renders_running} running,{" "}
                         {summary.stats.renders_failed} failed
                       </p>
+                      <p className="muted stat-highlight">
+                        {summary.stats.renders_storage_bytes > 0
+                          ? `${formatBytes(summary.stats.renders_storage_bytes)} output on disk`
+                          : "No render files yet"}
+                      </p>
                     </div>
                   </div>
+                  <div className="event-resource-panel">
+                    <h3 className="event-resource-heading">Resources & composition</h3>
+                    <div className="resource-grid">
+                      <div className="resource-block">
+                        <strong>Source files</strong>
+                        <p className="muted">
+                          {formatBytes(summary.stats.media_storage_bytes)} total ·{" "}
+                          {formatBytes(summary.stats.media_bytes_images)} images ·{" "}
+                          {formatBytes(summary.stats.media_bytes_videos)} videos
+                        </p>
+                        <p className="muted">
+                          {summary.stats.media_storage_files_found} paths resolved ·{" "}
+                          {summary.stats.media_storage_files_missing > 0 ? (
+                            <span className="resource-warn">
+                              {summary.stats.media_storage_files_missing} missing on server
+                            </span>
+                          ) : (
+                            "all paths found on server"
+                          )}
+                        </p>
+                      </div>
+                      <div className="resource-block">
+                        <strong>Indexing time</strong>
+                        <p className="muted">
+                          {summary.stats.index_duration_job_count > 0
+                            ? `Sum of per-job wall time: ${formatDurationSeconds(summary.stats.index_duration_seconds_total)} across ${summary.stats.index_duration_job_count} finished jobs (queued/running excluded).`
+                            : "No completed or failed index jobs with timing yet."}
+                        </p>
+                      </div>
+                      <div className="resource-block">
+                        <strong>Render outputs</strong>
+                        <p className="muted">
+                          {summary.stats.renders_completed > 0
+                            ? `${formatBytes(summary.stats.renders_storage_bytes)} for completed MP4s under storage.`
+                            : "No completed renders yet."}
+                        </p>
+                      </div>
+                    </div>
+                    {summary.stats.media_extension_top.length > 0 ? (
+                      <div className="extension-composition">
+                        <strong>Top file types (by asset count)</strong>
+                        <ul className="extension-badges">
+                          {summary.stats.media_extension_top.map((row) => (
+                            <li key={row.extension}>
+                              <span className="ext-badge">{row.extension}</span>
+                              <span className="ext-count">{row.count}</span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                  </>
                 ) : (
                   <p className="muted">Loading event summary...</p>
                 )}

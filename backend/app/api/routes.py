@@ -32,6 +32,7 @@ from ..schemas import (
     EventSummary,
     EventSummaryStats,
     EventUpdate,
+    MediaExtensionCount,
     FeedbackUpdate,
     Person,
     PersonCreate,
@@ -41,6 +42,7 @@ from ..schemas import (
     PersonReferenceCreate,
     RenderJobList,
 )
+from ..services.event_stats import media_footprint, renders_output_bytes, top_extensions_by_count
 from ..services.faces import face_service
 from ..services.ingest import create_asset_record, discover_media_files, purge_event_proxies, register_asset, resolve_ingest_path
 from ..services.indexing import get_event_context, get_event_context_filtered, reindex_face_insights_for_asset
@@ -364,6 +366,13 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
     index_by_status = IndexJobRepository.count_by_status_for_event(event_id)
     index_jobs_total = sum(index_by_status.values())
 
+    mf = media_footprint(assets)
+    idx_sec, idx_n = IndexJobRepository.sum_index_job_duration_seconds(event_id)
+    ext_top = [
+        MediaExtensionCount(extension=ext, count=cnt)
+        for ext, cnt in top_extensions_by_count(mf["extension_counts"], limit=12)
+    ]
+
     return EventSummary(
         event=event,
         stats=EventSummaryStats(
@@ -386,6 +395,15 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
             index_jobs_running=index_by_status["running"],
             index_jobs_completed=index_by_status["completed"],
             index_jobs_failed=index_by_status["failed"],
+            media_storage_bytes=int(mf["total_bytes"]),
+            media_storage_files_found=int(mf["files_found"]),
+            media_storage_files_missing=int(mf["files_missing"]),
+            media_bytes_images=int(mf["bytes_images"]),
+            media_bytes_videos=int(mf["bytes_videos"]),
+            renders_storage_bytes=renders_output_bytes(renders),
+            index_duration_seconds_total=float(idx_sec),
+            index_duration_job_count=int(idx_n),
+            media_extension_top=ext_top,
         ),
     )
 

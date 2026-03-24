@@ -59,7 +59,16 @@ describe("api client", () => {
             index_jobs_queued: 0,
             index_jobs_running: 0,
             index_jobs_completed: 0,
-            index_jobs_failed: 0
+            index_jobs_failed: 0,
+            media_storage_bytes: 0,
+            media_storage_files_found: 0,
+            media_storage_files_missing: 0,
+            media_bytes_images: 0,
+            media_bytes_videos: 0,
+            renders_storage_bytes: 0,
+            index_duration_seconds_total: 0,
+            index_duration_job_count: 0,
+            media_extension_top: []
           }
         })
     }));
