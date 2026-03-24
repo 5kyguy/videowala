@@ -31,6 +31,19 @@ from .db import migrate
 from .repositories import RenderRepository
 from .vector_store import migrate_pgvector
 
+
+class _QuietPollAccessFilter(logging.Filter):
+    """Hide noisy GETs from the dashboard poll loop (summary + renders every few seconds)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access":
+            return True
+        msg = record.getMessage()
+        if "GET /events/" in msg and ("/summary?" in msg or "/renders?" in msg):
+            return False
+        return True
+
+
 app = FastAPI(title=settings.app_name, version="0.1.0")
 logger = logging.getLogger(__name__)
 
@@ -47,6 +60,7 @@ app.include_router(router)
 
 @app.on_event("startup")
 def startup() -> None:
+    logging.getLogger("uvicorn.access").addFilter(_QuietPollAccessFilter())
     migrate()
     recovered = RenderRepository.mark_incomplete_jobs_failed(
         "Render interrupted by backend restart/reload. Please retry."
