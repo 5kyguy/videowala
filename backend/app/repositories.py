@@ -686,6 +686,7 @@ def _index_job_from_row(row: sqlite3.Row) -> IndexJob:
         created_at=from_iso(row["created_at"]),
         semantic_prompt=row["semantic_prompt"] if "semantic_prompt" in row.keys() and row["semantic_prompt"] is not None else None,
         staged_asset_ids=staged,
+        index_stage=row["index_stage"] if "index_stage" in row.keys() and row["index_stage"] else None,
     )
 
 
@@ -697,8 +698,8 @@ class IndexJobRepository:
             cur.execute(
                 """
                 INSERT INTO index_jobs
-                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at, semantic_prompt, staged_asset_ids_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at, semantic_prompt, staged_asset_ids_json, index_stage)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)
                 """,
                 (
                     job.id,
@@ -712,6 +713,7 @@ class IndexJobRepository:
                     to_iso(job.created_at),
                     job.semantic_prompt,
                     staged_json,
+                    job.index_stage,
                 ),
             )
         return job
@@ -780,14 +782,24 @@ class IndexJobRepository:
     def mark_running(job_id: str) -> None:
         with db_cursor() as cur:
             cur.execute(
-                "UPDATE index_jobs SET status = 'running', started_at = ?, progress_percent = 5 WHERE id = ?",
-                (to_iso(now_utc()), job_id),
+                """
+                UPDATE index_jobs
+                SET status = 'running', started_at = ?, progress_percent = 5, index_stage = ?
+                WHERE id = ?
+                """,
+                (to_iso(now_utc()), "Starting", job_id),
             )
 
     @staticmethod
-    def set_progress(job_id: str, progress_percent: int) -> None:
+    def set_progress(job_id: str, progress_percent: int, *, index_stage: str | None = None) -> None:
         with db_cursor() as cur:
-            cur.execute("UPDATE index_jobs SET progress_percent = ? WHERE id = ?", (progress_percent, job_id))
+            if index_stage is not None:
+                cur.execute(
+                    "UPDATE index_jobs SET progress_percent = ?, index_stage = ? WHERE id = ?",
+                    (progress_percent, index_stage, job_id),
+                )
+            else:
+                cur.execute("UPDATE index_jobs SET progress_percent = ? WHERE id = ?", (progress_percent, job_id))
 
     @staticmethod
     def mark_completed(job_id: str, insights_generated: int) -> None:
@@ -795,10 +807,10 @@ class IndexJobRepository:
             cur.execute(
                 """
                 UPDATE index_jobs
-                SET status = 'completed', progress_percent = 100, insights_generated = ?, finished_at = ?
+                SET status = 'completed', progress_percent = 100, insights_generated = ?, finished_at = ?, index_stage = ?
                 WHERE id = ?
                 """,
-                (insights_generated, to_iso(now_utc()), job_id),
+                (insights_generated, to_iso(now_utc()), "Complete", job_id),
             )
 
     @staticmethod
@@ -807,11 +819,37 @@ class IndexJobRepository:
             cur.execute(
                 """
                 UPDATE index_jobs
-                SET status = 'failed', error_message = ?, finished_at = ?
+                SET status = 'failed', error_message = ?, finished_at = ?, index_stage = ?
                 WHERE id = ?
                 """,
-                (error_message, to_iso(now_utc()), job_id),
+                (error_message, to_iso(now_utc()), "Failed", job_id),
             )
+
+    @staticmethod
+    def get_active_index_job_for_event(event_id: str) -> IndexJob | None:
+        """Prefer running over queued (single-flight PoC)."""
+        with db_cursor() as cur:
+            row = cur.execute(
+                """
+                SELECT * FROM index_jobs
+                WHERE event_id = ? AND status = 'running'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+            if row is not None:
+                return _index_job_from_row(row)
+            row = cur.execute(
+                """
+                SELECT * FROM index_jobs
+                WHERE event_id = ? AND status = 'queued'
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (event_id,),
+            ).fetchone()
+            return _index_job_from_row(row) if row is not None else None
 
 
 class AuditRepository:

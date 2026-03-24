@@ -239,6 +239,10 @@ class IndexJob(BaseModel):
         default=None,
         description="When set, one index job runs model-by-model across all listed assets (batch ingest).",
     )
+    index_stage: str | None = Field(
+        default=None,
+        description="Current pipeline stage label (prefetch, faces, VLM, …) while queued or running.",
+    )
 
 
 class FeedbackUpdate(BaseModel):
@@ -338,6 +342,9 @@ class EventSummaryStats(BaseModel):
     index_duration_job_count: int = 0
     # Top file extensions by asset count (composition)
     media_extension_top: list[MediaExtensionCount] = Field(default_factory=list)
+    # Latest active index job (queued or running) for live pipeline feedback
+    index_current_stage: str | None = None
+    index_current_progress_percent: int | None = None
 
 
 class EventSummary(BaseModel):

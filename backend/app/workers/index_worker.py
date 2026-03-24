@@ -91,6 +91,7 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
             created_at=now_utc(),
             semantic_prompt=semantic_prompt,
             staged_asset_ids=None,
+            index_stage="Queued",
         )
         IndexJobRepository.create(job)
         _INFLIGHT_INDEX[asset_id] = job.id
@@ -161,6 +162,7 @@ def submit_staged_index_job(
             created_at=now_utc(),
             semantic_prompt=semantic_prompt,
             staged_asset_ids=staged_asset_ids,
+            index_stage="Queued",
         )
         IndexJobRepository.create(job)
         for aid in staged_asset_ids:

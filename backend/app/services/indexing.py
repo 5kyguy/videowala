@@ -271,11 +271,11 @@ def _insights_ocr_row(asset: Asset, ocr_items: list[dict], ocr_model: str, run_o
     )
 
 
-def _index_job_progress(job_id: str | None, pct: int) -> None:
+def _index_job_progress(job_id: str | None, pct: int, stage: str) -> None:
     if not job_id:
         return
     pct = max(0, min(100, int(pct)))
-    IndexJobRepository.set_progress(job_id, pct)
+    IndexJobRepository.set_progress(job_id, pct, index_stage=stage)
 
 
 def _insights_asr_row(asset: Asset, asr_segments: list[dict]) -> AssetInsight:
@@ -325,7 +325,7 @@ def index_event_by_model_stages(
         event_id,
         n_assets,
     )
-    _index_job_progress(index_job_id, 8)
+    _index_job_progress(index_job_id, 8, "Prefetch (metadata & proxies)")
 
     states: list[_AssetIndexState] = []
     for i, asset in enumerate(assets):
@@ -334,12 +334,16 @@ def index_event_by_model_stages(
         analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
         states.append(_AssetIndexState(asset=asset, proxy=proxy, analysis_media_path=analysis_media_path))
         if n_assets and (i % 100 == 0 or i == n_assets - 1):
-            _index_job_progress(index_job_id, 8 + int(4 * (i + 1) / n_assets))
+            _index_job_progress(
+                index_job_id,
+                8 + int(4 * (i + 1) / n_assets),
+                "Prefetch (metadata & proxies)",
+            )
             if i % 200 == 0:
                 logger.info("Index prefetch progress: %d/%d assets", i + 1, n_assets)
 
     logger.info("Index prefetch done; phase 1/6: face model over %d asset(s)", n_assets)
-    _index_job_progress(index_job_id, 12)
+    _index_job_progress(index_job_id, 12, "Face detection")
 
     def _iter_states():
         if settings.indexing_show_progress and len(states) > 1:
@@ -359,14 +363,18 @@ def index_event_by_model_stages(
         st.detections, st.matches = _face_detections_and_matches(st.asset, st.analysis_media_path)
         batch_face.extend(_insights_face_rows(st.asset, st.detections, st.matches))
         if n_assets and (fi % 100 == 0 or fi == n_assets - 1):
-            _index_job_progress(index_job_id, 12 + int(16 * (fi + 1) / n_assets))
+            _index_job_progress(
+                index_job_id,
+                12 + int(16 * (fi + 1) / n_assets),
+                "Face detection",
+            )
     if batch_face:
         InsightRepository.create_many(batch_face)
         all_insights.extend(batch_face)
     face_service.release()
 
     logger.info("Index phase 2/6: ASR (%d video(s))", sum(1 for s in states if s.asset.media_type == "video"))
-    _index_job_progress(index_job_id, 28)
+    _index_job_progress(index_job_id, 28, "Speech (ASR)")
 
     # Phase 2: ASR — transcribe videos; images get an empty ASR insight (same shape as before)
     batch_asr: list[AssetInsight] = []
@@ -382,7 +390,7 @@ def index_event_by_model_stages(
     asr_service.release()
 
     logger.info("Index phase 3/6: VLM over %d asset(s)", n_assets)
-    _index_job_progress(index_job_id, 38)
+    _index_job_progress(index_job_id, 38, "Vision-language (VLM)")
 
     # Phase 3: VLM — all assets
     batch_vlm: list[AssetInsight] = []
@@ -397,14 +405,18 @@ def index_event_by_model_stages(
         assert st.vlm is not None
         batch_vlm.extend(_insights_vlm_rows(st.asset, st.vlm))
         if n_assets and (vi % 50 == 0 or vi == n_assets - 1):
-            _index_job_progress(index_job_id, 38 + int(20 * (vi + 1) / n_assets))
+            _index_job_progress(
+                index_job_id,
+                38 + int(20 * (vi + 1) / n_assets),
+                "Vision-language (VLM)",
+            )
     if batch_vlm:
         InsightRepository.create_many(batch_vlm)
         all_insights.extend(batch_vlm)
     vlm_service.release()
 
     logger.info("Index phase 4/6: OCR over %d asset(s)", n_assets)
-    _index_job_progress(index_job_id, 58)
+    _index_job_progress(index_job_id, 58, "OCR")
 
     # Phase 4: OCR — all assets
     batch_ocr: list[AssetInsight] = []
@@ -418,14 +430,18 @@ def index_event_by_model_stages(
         )
         batch_ocr.append(_insights_ocr_row(st.asset, st.ocr_items, st.ocr_model, st.run_ocr))
         if n_assets and (oi % 100 == 0 or oi == n_assets - 1):
-            _index_job_progress(index_job_id, 58 + int(14 * (oi + 1) / n_assets))
+            _index_job_progress(
+                index_job_id,
+                58 + int(14 * (oi + 1) / n_assets),
+                "OCR",
+            )
     if batch_ocr:
         InsightRepository.create_many(batch_ocr)
         all_insights.extend(batch_ocr)
     ocr_service.release()
 
     logger.info("Index phase 5–6/6: segments, cull, embeddings for %d asset(s)", n_assets)
-    _index_job_progress(index_job_id, 72)
+    _index_job_progress(index_job_id, 72, "Embeddings & segments")
 
     # Phase 5–6: segments + cull (CPU), then embedding model once for all assets
     text_source_limit = 8000
@@ -503,7 +519,11 @@ def index_event_by_model_stages(
         InsightRepository.create_many([sem_insight])
         all_insights.append(sem_insight)
         if n_assets and (ei % 100 == 0 or ei == n_assets - 1):
-            _index_job_progress(index_job_id, 72 + int(23 * (ei + 1) / n_assets))
+            _index_job_progress(
+                index_job_id,
+                72 + int(23 * (ei + 1) / n_assets),
+                "Embeddings & segments",
+            )
         pipeline = "image" if st.asset.media_type == "image" else "video"
         insight_count = 8
         audit_action(

@@ -729,6 +729,14 @@ export default function App() {
                         {summary.stats.index_jobs_queued} queued, {summary.stats.index_jobs_running} running,{" "}
                         {summary.stats.index_jobs_failed} failed
                       </p>
+                      {summary.stats.index_current_stage != null &&
+                      summary.stats.index_current_progress_percent != null ? (
+                        <p className="muted stat-highlight">
+                          <strong>{summary.stats.index_current_stage}</strong>
+                          {" · "}
+                          {summary.stats.index_current_progress_percent}%
+                        </p>
+                      ) : null}
                       <p className="muted stat-highlight">
                         {summary.stats.index_duration_job_count > 0
                           ? `${formatDurationSeconds(summary.stats.index_duration_seconds_total)} total job time (${summary.stats.index_duration_job_count} jobs)`

@@ -269,6 +269,14 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 9")
 
+        if version < 10:
+            cur.executescript(
+                """
+                ALTER TABLE index_jobs ADD COLUMN index_stage TEXT;
+                """
+            )
+            cur.execute("PRAGMA user_version = 10")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)

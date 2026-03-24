@@ -107,6 +107,10 @@ export type EventSummaryStats = {
   index_duration_seconds_total: number;
   index_duration_job_count: number;
   media_extension_top: MediaExtensionCount[];
+  /** Active queued/running index job: current model stage label from the backend */
+  index_current_stage?: string | null;
+  /** Overall pipeline progress 0–100 for the active index job */
+  index_current_progress_percent?: number | null;
 };
 
 export type EventSummary = {

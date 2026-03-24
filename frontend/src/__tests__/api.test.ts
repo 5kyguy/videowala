@@ -68,7 +68,9 @@ describe("api client", () => {
             renders_storage_bytes: 0,
             index_duration_seconds_total: 0,
             index_duration_job_count: 0,
-            media_extension_top: []
+            media_extension_top: [],
+            index_current_stage: null,
+            index_current_progress_percent: null
           }
         })
     }));

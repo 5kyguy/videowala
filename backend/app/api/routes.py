@@ -387,6 +387,15 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
     index_by_status = IndexJobRepository.count_by_status_for_event(event_id)
     index_jobs_total = sum(index_by_status.values())
 
+    active_index = IndexJobRepository.get_active_index_job_for_event(event_id)
+    index_current_stage: str | None = None
+    index_current_progress_percent: int | None = None
+    if active_index is not None:
+        index_current_progress_percent = active_index.progress_percent
+        index_current_stage = active_index.index_stage
+        if active_index.status == "queued" and not index_current_stage:
+            index_current_stage = "Queued"
+
     mf = media_footprint(assets)
     idx_sec, idx_n = IndexJobRepository.sum_index_job_duration_seconds(event_id)
     ext_top = [
@@ -425,6 +434,8 @@ def get_event_summary(event_id: str, tenant_id: str) -> EventSummary:
             index_duration_seconds_total=float(idx_sec),
             index_duration_job_count=int(idx_n),
             media_extension_top=ext_top,
+            index_current_stage=index_current_stage,
+            index_current_progress_percent=index_current_progress_percent,
         ),
     )
 
