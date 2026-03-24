@@ -665,6 +665,21 @@ class RenderRepository:
             return cur.rowcount > 0
 
 
+def _index_job_from_row(row: sqlite3.Row) -> IndexJob:
+    return IndexJob(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        event_id=row["event_id"],
+        asset_id=row["asset_id"],
+        status=row["status"],
+        progress_percent=int(row["progress_percent"]),
+        insights_generated=int(row["insights_generated"]),
+        error_message=row["error_message"],
+        created_at=from_iso(row["created_at"]),
+        semantic_prompt=row["semantic_prompt"] if "semantic_prompt" in row.keys() and row["semantic_prompt"] is not None else None,
+    )
+
+
 class IndexJobRepository:
     @staticmethod
     def create(job: IndexJob) -> IndexJob:
@@ -672,8 +687,8 @@ class IndexJobRepository:
             cur.execute(
                 """
                 INSERT INTO index_jobs
-                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at, semantic_prompt)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
                 """,
                 (
                     job.id,
@@ -685,6 +700,7 @@ class IndexJobRepository:
                     job.insights_generated,
                     job.error_message,
                     to_iso(job.created_at),
+                    job.semantic_prompt,
                 ),
             )
         return job
@@ -695,17 +711,7 @@ class IndexJobRepository:
             row = cur.execute("SELECT * FROM index_jobs WHERE id = ?", (job_id,)).fetchone()
         if row is None:
             return None
-        return IndexJob(
-            id=row["id"],
-            tenant_id=row["tenant_id"],
-            event_id=row["event_id"],
-            asset_id=row["asset_id"],
-            status=row["status"],
-            progress_percent=int(row["progress_percent"]),
-            insights_generated=int(row["insights_generated"]),
-            error_message=row["error_message"],
-            created_at=from_iso(row["created_at"]),
-        )
+        return _index_job_from_row(row)
 
     @staticmethod
     def list_for_event(event_id: str) -> list[IndexJob]:
@@ -714,20 +720,7 @@ class IndexJobRepository:
                 "SELECT * FROM index_jobs WHERE event_id = ? ORDER BY created_at DESC",
                 (event_id,),
             ).fetchall()
-        return [
-            IndexJob(
-                id=row["id"],
-                tenant_id=row["tenant_id"],
-                event_id=row["event_id"],
-                asset_id=row["asset_id"],
-                status=row["status"],
-                progress_percent=int(row["progress_percent"]),
-                insights_generated=int(row["insights_generated"]),
-                error_message=row["error_message"],
-                created_at=from_iso(row["created_at"]),
-            )
-            for row in rows
-        ]
+        return [_index_job_from_row(row) for row in rows]
 
     @staticmethod
     def count_by_status_for_event(event_id: str) -> dict[str, int]:

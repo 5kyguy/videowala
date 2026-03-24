@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
+from ..gpu_memory import reclaim_gpu_memory
 
 
 def _stub_caption(name: str) -> str:
@@ -185,6 +186,12 @@ class VlmService:
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    def release(self) -> None:
+        """Unload VLM weights so the next serial stage can load a different model."""
+        self._model = None
+        self._processor = None
+        reclaim_gpu_memory()
 
     def _ensure_loaded(self) -> None:
         if settings.stage2_stub_models:

@@ -48,6 +48,8 @@ Key settings (see `backend/app/config.py`):
 - **OCR** uses **PaddleOCR** only; per-event `ocr_languages` on the event record selects the Paddle `lang` code (e.g. `en`, `hi`, `gu`).
 - **Indexing UX**:
   - `INDEXING_PROGRESS` → `0` / `1` to force-disable/force-enable tqdm progress bars
+  - `INDEX_WORKERS` → size of the index job thread pool (default **`1`**, serial indexing)
+  - `IMAGE_INDEX_SEMANTIC_CULL_PERCENT` → when `POST /assets` includes **`semantic_prompt`** for images, fraction of image segments to keep after semantic ranking (default **`0.5`**)
 - **Rendering:** uses `ffmpeg` / `ffprobe` on PATH. Output uses **center crop** to the requested orientation (landscape 16:9 or portrait 9:16), optional **transpose** when VLM tags indicate sideways capture, then **letterbox padding** only so concatenated clips share one canvas. No user-facing resolution, fps, filter preset, or crossfade settings.
 
 Health check:

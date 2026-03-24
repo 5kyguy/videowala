@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from ..config import settings
+from ..gpu_memory import reclaim_gpu_memory
 
 logger = logging.getLogger(__name__)
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm"}
@@ -87,6 +88,11 @@ class OcrService:
     @property
     def model_name(self) -> str:
         return "PaddleOCR"
+
+    def release(self) -> None:
+        """Drop cached PaddleOCR instances between serial indexing stages."""
+        OcrService._paddle_by_lang.clear()
+        reclaim_gpu_memory()
 
     def _ensure_paddle(self, lang: str) -> object:
         if lang in OcrService._paddle_by_lang:

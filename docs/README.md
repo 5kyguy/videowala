@@ -9,6 +9,7 @@ This folder is implementation-focused: how the Stage 1 synchronous MVP is built 
 | Doc | Contents |
 | --- | -------- |
 | [`architecture.md`](architecture.md) | Components, synchronous flows, Mermaid diagrams |
+| [`pipeline.md`](pipeline.md) | Image vs video indexing, serial stages, diagrams |
 | [`data-model.md`](data-model.md) | SQLite schema + ER diagram |
 | [`api.md`](api.md) | HTTP endpoints |
 | [`running.md`](running.md) | Run backend + frontend locally |

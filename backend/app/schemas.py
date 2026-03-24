@@ -79,6 +79,10 @@ class AssetIngestBody(BaseModel):
     event_id: str
     media_path: str | None = None
     media_type: Literal["image", "video"] | None = None
+    semantic_prompt: str | None = Field(
+        default=None,
+        description="Optional theme for image indexing: after embedding, re-rank photo segments in this event (ignored for video assets).",
+    )
     path: str | None = Field(
         default=None,
         description="Path to one media file or a folder; image/video extensions are auto-detected.",
@@ -227,6 +231,10 @@ class IndexJob(BaseModel):
     insights_generated: int = 0
     error_message: str | None = None
     created_at: datetime
+    semantic_prompt: str | None = Field(
+        default=None,
+        description="Optional ingest-time prompt stored on the job for image semantic culling.",
+    )
 
 
 class FeedbackUpdate(BaseModel):
@@ -264,7 +272,7 @@ class FeedbackUpdate(BaseModel):
 class PhotoCurationRequest(BaseModel):
     tenant_id: str
     event_id: str
-    prompt: str = Field(min_length=5, description="What is this album for? Describe the purpose or theme.")
+    prompt: str = Field(min_length=1, description="What is this album for? Describe the purpose or theme.")
     cull_percent: float = Field(
         default=0.5,
         ge=0.0,

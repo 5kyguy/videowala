@@ -5,6 +5,26 @@ from ..schemas import PhotoCurationItem, PhotoCurationRequest
 from .search import semantic_search
 
 
+def apply_photo_semantic_cull_for_event(
+    *,
+    tenant_id: str,
+    event_id: str,
+    prompt: str,
+    cull_percent: float = 0.5,
+    include_faces: list[str] | None = None,
+) -> list[PhotoCurationItem]:
+    """Run the same semantic + cull scoring as the photo curation API (ingest-time or manual)."""
+    p = (prompt or "").strip() or " "
+    req = PhotoCurationRequest(
+        tenant_id=tenant_id,
+        event_id=event_id,
+        prompt=p,
+        cull_percent=cull_percent,
+        include_faces=list(include_faces or []),
+    )
+    return score_photo_segments(req)
+
+
 def list_photo_curation_items(event_id: str) -> list[PhotoCurationItem]:
     """Per-image rows from segment culling for image assets only (one segment per photo today)."""
     segments = SegmentRepository.list_for_event(event_id, keep_only=False)
@@ -42,7 +62,11 @@ def score_photo_segments(request: PhotoCurationRequest) -> list[PhotoCurationIte
     segments = SegmentRepository.list_for_event(request.event_id, keep_only=False)
     assets = {a.id: a for a in AssetRepository.list_for_event(request.event_id)}
 
-    image_segments = [seg for seg in segments if assets.get(seg.asset_id, {}).media_type == "image"]
+    image_segments = [
+        seg
+        for seg in segments
+        if (a := assets.get(seg.asset_id)) is not None and a.media_type == "image"
+    ]
     if not image_segments:
         return []
 

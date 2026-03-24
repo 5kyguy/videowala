@@ -4,6 +4,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
+from ..config import settings
 from ..db import now_utc
 from ..repositories import AssetRepository, IndexJobRepository, RenderRepository, next_id
 from ..schemas import IndexJob
@@ -12,7 +13,7 @@ from ..services.rendering import execute_render_job
 
 logger = logging.getLogger(__name__)
 
-_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="videowala-worker")
+_EXECUTOR = ThreadPoolExecutor(max_workers=settings.index_workers, thread_name_prefix="videowala-worker")
 # Renders use a separate pool so a render is never queued behind long-running index jobs (same global pool starved the UI).
 _RENDER_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="videowala-render")
 _LOCK = Lock()
@@ -47,12 +48,12 @@ def _emit_indexing_progress_log(event_id: str) -> None:
     )
 
 
-def run_index_job(asset_id: str) -> int:
-    insights = index_asset(asset_id)
+def run_index_job(asset_id: str, semantic_prompt: str | None = None) -> int:
+    insights = index_asset(asset_id, semantic_prompt=semantic_prompt)
     return len(insights)
 
 
-def submit_index_job(asset_id: str) -> IndexJob:
+def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> IndexJob:
     asset = AssetRepository.get(asset_id)
     if asset is None:
         raise KeyError(f"Asset not found: {asset_id}")
@@ -73,6 +74,7 @@ def submit_index_job(asset_id: str) -> IndexJob:
             insights_generated=0,
             error_message=None,
             created_at=now_utc(),
+            semantic_prompt=semantic_prompt,
         )
         IndexJobRepository.create(job)
         _INFLIGHT_INDEX[asset_id] = job.id
@@ -81,7 +83,7 @@ def submit_index_job(asset_id: str) -> IndexJob:
             IndexJobRepository.mark_running(job.id)
             try:
                 IndexJobRepository.set_progress(job.id, 30)
-                count = run_index_job(asset.id)
+                count = run_index_job(asset.id, semantic_prompt=job.semantic_prompt)
                 IndexJobRepository.mark_completed(job.id, count)
                 _emit_indexing_progress_log(asset.event_id)
             except Exception as exc:  # noqa: BLE001

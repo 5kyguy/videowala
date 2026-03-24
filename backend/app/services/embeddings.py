@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import dataclass
 
 from ..config import settings
+from ..gpu_memory import reclaim_gpu_memory
 
 
 def _deterministic_vector(seed: str, dim: int | None = None) -> list[float]:
@@ -71,6 +72,10 @@ class EmbeddingService:
     @property
     def model_id(self) -> str:
         return self._model_id
+
+    def release(self) -> None:
+        self._model = None
+        reclaim_gpu_memory()
 
     def _ensure_model(self) -> None:
         if settings.stage2_stub_models:

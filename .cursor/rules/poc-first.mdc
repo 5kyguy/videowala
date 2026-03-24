@@ -1,0 +1,12 @@
+---
+description: Videowala PoC priorities — quality and viability over compatibility and speed
+globs:
+alwaysApply: true
+---
+
+# Videowala PoC defaults
+
+- This repo is a **proof-of-concept**. Optimize for **viability** and **output quality**, not for backward compatibility, migration shims, or throughput.
+- Prefer **direct refactors** and clean replacements over maintaining parallel legacy code paths unless explicitly requested.
+- For backend indexing and GPU behavior, **do not recommend `DEV_MODE=true`** to work around issues; fix problems in real (GPU-capable) paths.
+- Serial pipelines and heavier models are acceptable when they improve quality or reduce GPU memory conflicts.

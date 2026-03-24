@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from ..config import settings
+from ..gpu_memory import reclaim_gpu_memory
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 
@@ -45,23 +46,33 @@ class FaceService:
     def __init__(self) -> None:
         self._face_analyzer: Any | None = None
         self._model_name = "insightface"
-        if settings.enable_real_face_recognition:
-            try:
-                from insightface.app import FaceAnalysis
-
-                self._face_analyzer = FaceAnalysis(name="buffalo_l")
-                self._face_analyzer.prepare(ctx_id=0, det_size=(640, 640))
-            except Exception:
-                self._face_analyzer = None
 
     @property
     def model_name(self) -> str:
         return self._model_name
 
+    def _ensure_real_analyzer(self) -> None:
+        if not settings.enable_real_face_recognition:
+            return
+        if self._face_analyzer is not None:
+            return
+        try:
+            from insightface.app import FaceAnalysis
+
+            self._face_analyzer = FaceAnalysis(name="buffalo_l")
+            self._face_analyzer.prepare(ctx_id=0, det_size=(640, 640))
+        except Exception:
+            self._face_analyzer = None
+
+    def release(self) -> None:
+        self._face_analyzer = None
+        reclaim_gpu_memory()
+
     def embed_reference(self, image_path: str) -> list[float]:
         target = Path(image_path)
         if not target.exists():
             return _deterministic_vector(f"media:{image_path}")
+        self._ensure_real_analyzer()
         if self._face_analyzer is None:
             return _deterministic_vector(f"media:{target.resolve()}")
         try:
@@ -80,6 +91,7 @@ class FaceService:
         target = Path(media_path)
         if not target.exists():
             return []
+        self._ensure_real_analyzer()
         if self._face_analyzer is None:
             confidence = 0.7 if target.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"} else 0.55
             embedding = _deterministic_vector(f"media:{target.resolve()}")

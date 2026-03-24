@@ -240,7 +240,7 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
         for abs_path, mtype in file_iter:
             asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
             try:
-                job = submit_index_job(asset.id)
+                job = submit_index_job(asset.id, semantic_prompt=payload.semantic_prompt)
                 assets_out.append(
                     {
                         "asset_id": asset.id,
@@ -280,7 +280,7 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
             media_type=payload.media_type,
         )
     )
-    job = submit_index_job(asset.id)
+    job = submit_index_job(asset.id, semantic_prompt=payload.semantic_prompt)
     return {"asset_id": asset.id, "insights_generated": 0, "index_job_id": job.id, "index_status": job.status}
 
 

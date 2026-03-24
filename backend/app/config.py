@@ -64,6 +64,12 @@ class Settings(BaseModel):
     )
     # tqdm progress for indexing (per-asset steps + batch file loop) when True.
     indexing_show_progress: bool = Field(default_factory=_default_indexing_progress)
+    # Serial index jobs: 1 = strict single-flight indexing (PoC default).
+    index_workers: int = Field(default_factory=lambda: max(1, int(os.getenv("INDEX_WORKERS", "1"))))
+    # When ingest provides `semantic_prompt` for images, run photo culling with this keep fraction.
+    image_index_semantic_cull_percent: float = Field(
+        default_factory=lambda: float(os.getenv("IMAGE_INDEX_SEMANTIC_CULL_PERCENT", "0.5"))
+    )
 
 
 settings = Settings()

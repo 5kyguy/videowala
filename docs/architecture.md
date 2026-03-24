@@ -11,7 +11,8 @@
   - Render outputs go to `./storage/<tenant_id>/<event_id>/renders/*.mp4` (repo root).
   - Scratch work uses `./tmp/<tenant_id>/<event_id>/...` (repo root) and is cleaned up after renders.
 - **Indexing**:
-  - Runs synchronously today (API calls `run_index_job()` inline).
+  - `POST /assets` registers assets and **`submit_index_job`** queues work on a **thread pool** (default one worker: serial across assets).
+  - **Image** and **video** use **separate pipelines** (`index_image_asset` vs `index_video_asset`): video runs ASR on the proxy; images skip ASR. Between stages, heavyweight models are **released** so only one major model stack is resident at a time (PoC).
   - Produces `asset_insights` rows (caption/tags + face detections/matches, OCR/ASR text, and semantic embedding metadata).
 - **Planning**: Deterministic “planner skeleton” that returns a strict action list (`PlannerPlan`).
 - **Rendering**: Deterministic ffmpeg pipeline (prepare per-asset clips → concat → optional subtitles/overlays).
@@ -26,7 +27,7 @@ flowchart LR
   API -->|persist| SQLITE[(SQLite\n./storage/videowala.db)]
   API -->|read/write| FS[(Filesystem\nstorage/ + tmp/)]
 
-  API -->|index asset (sync)| INDEX[Indexing pipeline]
+  API -->|submit index job| INDEX[Indexing pipelines]
   INDEX -->|write insights| SQLITE
 
   API -->|build plan| PLANNER[Planner (deterministic)]
@@ -45,23 +46,25 @@ flowchart LR
 
 ### Ingest + Index
 
-`POST /assets` registers an asset row, then indexes it immediately.
+`POST /assets` registers an asset row, enqueues an **`index_jobs`** row, and returns quickly; a worker runs **`index_image_asset`** or **`index_video_asset`** by `media_type`.
 
 ```mermaid
 sequenceDiagram
   participant C as Client
   participant API as FastAPI
   participant DB as SQLite
+  participant W as Index worker
   participant IDX as Indexer
 
   C->>API: POST /assets (tenant_id, event_id, media_path, media_type)
   API->>DB: INSERT assets + audit(asset_registered)
-  API->>IDX: index_asset(asset_id)
+  API->>DB: INSERT index_jobs (queued)
+  API-->>C: {asset_id, index_job_id}
+  W->>IDX: index_image_asset / index_video_asset(asset_id)
   IDX->>DB: DELETE mutable insights for asset
-  IDX->>IDX: detect faces, match refs
-  IDX->>IDX: (optional) OCR/ASR
+  IDX->>IDX: serial stages + model release between stages
   IDX->>DB: INSERT asset_insights + audit(asset_indexed)
-  API-->>C: {asset_id, insights_generated}
+  W->>DB: UPDATE index_jobs completed
 ```
 
 ### Plan → Render

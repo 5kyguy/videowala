@@ -8,7 +8,11 @@ All endpoints are **tenant-scoped** by `tenant_id` and (where relevant) `event_i
 
 **OCR:** indexing uses **PaddleOCR** only. OCR runs **after** the VLM step when any VLM tag intersects `OCR_TRIGGER_TAGS` (see `backend/app/config.py`). Event fields `predefined_tags`, `ocr_languages`, and `PATCH /events/{event_id}` control vocabulary and Paddle language codes.
 
-**Indexing progress:** when stderr is a TTY, `tqdm` shows a **per-asset** bar (faces → ASR → VLM → gated OCR) and a **batch** bar over files. Set `INDEXING_PROGRESS=0` to disable, or `INDEXING_PROGRESS=1` to force on (e.g. piped logs).
+**Indexing progress:** when stderr is a TTY, `tqdm` shows a **batch** bar over files in folder ingest. Set `INDEXING_PROGRESS=0` to disable, or `INDEXING_PROGRESS=1` to force on (e.g. piped logs).
+
+**Indexing execution:** each asset is indexed on a **background thread pool** (default **`INDEX_WORKERS=1`**, strictly serial). Heavy models (faces → ASR on video → VLM → gated OCR → embeddings) load and unload **one at a time** per asset for GPU PoC quality.
+
+**Image ingest theme (optional):** `POST /assets` may include **`semantic_prompt`** (string). For **image** assets this runs the same semantic + cull pass as photo curation after embedding (re-ranks image segments in the event). Ignored for video assets. The created **`index_jobs`** row stores `semantic_prompt` when provided.
 
 ## Health
 
@@ -44,9 +48,9 @@ Event renders response includes render jobs for that event (latest first), suita
 
 - `POST /assets`
 
-**Single file (legacy):** `tenant_id`, `event_id`, `media_path`, `media_type` (`image` | `video`).
+**Single file (legacy):** `tenant_id`, `event_id`, `media_path`, `media_type` (`image` | `video`), optional **`semantic_prompt`**.
 
-**File or folder (batch):** `tenant_id`, `event_id`, `path` (absolute or relative to backend project root), optional `recursive` (default `true`). All files with known image/video extensions under that path are registered and indexed in one request.
+**File or folder (batch):** `tenant_id`, `event_id`, `path` (absolute or relative to backend project root), optional `recursive` (default `true`), optional **`semantic_prompt`** (applies to each registered image in the batch). All files with known image/video extensions under that path are registered and indexed in one request.
 
 Response — single: `{ "asset_id", "insights_generated" }`.  
 Response — batch: `{ "batch": true, "count", "failed", "assets": [{ "asset_id", "media_path", "media_type", "insights_generated", "error" }, ...] }`.  

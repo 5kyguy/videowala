@@ -484,6 +484,20 @@ footer {
   opacity: 0.72;
 }
 
+.callout {
+  padding: 10px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  border: 1px solid;
+}
+
+.callout-warning {
+  background: rgba(234, 179, 8, 0.1);
+  border-color: rgba(234, 179, 8, 0.4);
+  color: #fde68a;
+}
+
 @media (max-width: 1000px) {
   .layout {
     grid-template-columns: 1fr;

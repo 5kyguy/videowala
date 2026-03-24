@@ -587,6 +587,11 @@ export default function App() {
                   ) : null}
                 </div>
               </div>
+              <div className="callout callout-warning">
+                <strong>Heads up — data transfer:</strong> Opening the album page fetches full-resolution images from
+                the server and consumes bandwidth, similar to downloading the ZIP. Only open it when you need to
+                review photos interactively.
+              </div>
               <div className="workflow-grid">
                 <label>
                   Show section
@@ -785,67 +790,12 @@ export default function App() {
               <p className="muted">Select an event to load photo picks.</p>
             ) : photoCuration && photoCuration.items.length === 0 ? (
               <p className="muted">No indexed images for this event yet.</p>
-            ) : photoCuration ? (
-              <div className="photo-curation-panels">
-                <div className="photo-curation-panel">
-                  <h3>Kept ({photoParts.kept.length})</h3>
-                  <div className="photo-curation-grid">
-                    {photoParts.kept.map((item) => (
-                      <figure key={item.segment_id} className="photo-curation-thumb">
-                        <img
-                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
-                          alt=""
-                          loading="lazy"
-                        />
-                        <figcaption>
-                          <code>{item.asset_id}</code>
-                          <span className="muted"> · score {item.score.toFixed(2)}</span>
-                        </figcaption>
-                      </figure>
-                    ))}
-                  </div>
-                </div>
-                <div className="photo-curation-panel">
-                  <h3>Duplicates ({photoParts.duplicates.length})</h3>
-                  <div className="photo-curation-grid">
-                    {photoParts.duplicates.map((item) => (
-                      <figure key={item.segment_id} className="photo-curation-thumb is-dim">
-                        <img
-                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
-                          alt=""
-                          loading="lazy"
-                        />
-                        <figcaption>
-                          <code>{item.asset_id}</code>
-                          <span className="muted"> · dup</span>
-                        </figcaption>
-                      </figure>
-                    ))}
-                  </div>
-                </div>
-                <div className="photo-curation-panel">
-                  <h3>Rejected / low score ({photoParts.rejected.length})</h3>
-                  <div className="photo-curation-grid">
-                    {photoParts.rejected.map((item) => (
-                      <figure key={item.segment_id} className="photo-curation-thumb is-dim">
-                        <img
-                          src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
-                          alt=""
-                          loading="lazy"
-                        />
-                        <figcaption>
-                          <code>{item.asset_id}</code>
-                          {item.reject_reasons.length > 0 ? (
-                            <span className="muted"> · {item.reject_reasons.join(", ")}</span>
-                          ) : null}
-                        </figcaption>
-                      </figure>
-                    ))}
-                  </div>
-                </div>
-              </div>
             ) : (
-              <p className="muted">Loading photo picks…</p>
+              <p className="muted">
+                {photoCuration!.items.length} indexed image(s). Use{" "}
+                <strong>Open album page</strong> to review them — opening the album page fetches images and
+                consumes server bandwidth, similar to downloading the ZIP.
+              </p>
             )}
           </section>
 

@@ -253,6 +253,14 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 7")
 
+        if version < 8:
+            cur.executescript(
+                """
+                ALTER TABLE index_jobs ADD COLUMN semantic_prompt TEXT;
+                """
+            )
+            cur.execute("PRAGMA user_version = 8")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)
