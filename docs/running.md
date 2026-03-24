@@ -50,6 +50,9 @@ Key settings (see `backend/app/config.py`):
   - `INDEXING_PROGRESS` → `0` / `1` to force-disable/force-enable tqdm progress bars
   - `INDEX_WORKERS` → size of the index job thread pool (default **`1`**, serial indexing)
   - `IMAGE_INDEX_SEMANTIC_CULL_PERCENT` → when `POST /assets` includes **`semantic_prompt`** for images, fraction of image segments to keep after semantic ranking (default **`0.5`**)
+- **Planning (video previews)**:
+  - `PLANNER_MODEL_ENABLED` → default `true`; when `true`, after deterministic segment selection the backend runs **`Qwen/Qwen2.5-7B-Instruct`** to reorder `segment_ids` for narrative flow and shot continuity (`set_order.strategy` = `preserve_planner`). Set to `false` to keep legacy ordering only (highlight / chronological / person-focus strategies).
+  - `PLANNER_MODEL_ID`, `PLANNER_MAX_SEGMENTS`, `PLANNER_TEMPERATURE`, `PLANNER_MAX_NEW_TOKENS` → tuning for the planner LLM (stub/test mode uses a continuity heuristic instead of loading the model).
 - **Rendering:** uses `ffmpeg` / `ffprobe` on PATH. Output uses **center crop** to the requested orientation (landscape 16:9 or portrait 9:16), optional **transpose** when VLM tags indicate sideways capture, then **letterbox padding** only so concatenated clips share one canvas. No user-facing resolution, fps, filter preset, or crossfade settings.
 
 Health check:

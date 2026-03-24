@@ -14,7 +14,7 @@
   - `POST /assets` registers assets and **`submit_index_job`** queues work on a **thread pool** (default one worker: serial across assets).
   - **Image** and **video** use **separate pipelines** (`index_image_asset` vs `index_video_asset`): video runs ASR on the proxy; images skip ASR. Between stages, heavyweight models are **released** so only one major model stack is resident at a time (PoC).
   - Produces `asset_insights` rows (caption/tags + face detections/matches, OCR/ASR text, and semantic embedding metadata).
-- **Planning**: Deterministic “planner skeleton” that returns a strict action list (`PlannerPlan`).
+- **Planning**: Deterministic segment **selection** (scores + semantic retrieval) returns a strict action list (`PlannerPlan`). Optional **model-assisted sequencing** (`Qwen2.5-7B-Instruct`, configurable) reorders selected `segment_ids` for narrative / shot continuity; render uses `preserve_planner` order (FFmpeg only).
 - **Rendering**: Deterministic ffmpeg pipeline (prepare per-asset clips → concat → optional subtitles/overlays).
 - **OCR, ASR, semantic embeddings**: invoked as part of indexing; OCR/ASR run against media, and semantic vectors are written to **Postgres + pgvector** when available (best-effort if Postgres is unavailable).
 
@@ -30,7 +30,7 @@ flowchart LR
   API -->|submit index job| INDEX[Indexing pipelines]
   INDEX -->|write insights| SQLITE
 
-  API -->|build plan| PLANNER[Planner (deterministic)]
+  API -->|build plan| PLANNER[Planner + optional LLM sequencing]
   PLANNER -->|store plan| SQLITE
 
   API -->|render (sync)| RENDER[Rendering (ffmpeg)]

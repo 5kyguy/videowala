@@ -72,6 +72,12 @@ class Settings(BaseModel):
     image_index_semantic_cull_percent: float = Field(
         default_factory=lambda: float(os.getenv("IMAGE_INDEX_SEMANTIC_CULL_PERCENT", "0.5"))
     )
+    # Plan sequencing: Qwen2.5 text LLM reorders selected segments for narrative / shot continuity (PoC).
+    planner_model_enabled: bool = Field(default_factory=lambda: _parse_bool(os.getenv("PLANNER_MODEL_ENABLED"), True))
+    planner_model_id: str = Field(default_factory=lambda: os.getenv("PLANNER_MODEL_ID", "Qwen/Qwen2.5-7B-Instruct"))
+    planner_max_segments: int = Field(default_factory=lambda: max(4, int(os.getenv("PLANNER_MAX_SEGMENTS", "80"))))
+    planner_temperature: float = Field(default_factory=lambda: float(os.getenv("PLANNER_TEMPERATURE", "0.2")))
+    planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "4096")))
 
 
 settings = Settings()

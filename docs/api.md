@@ -102,6 +102,8 @@ All three accept mostly the same core request fields:
 - `include_media_types` — optional; **empty defaults to `["video"]`**. Image-only values are rejected. Planning and render pools are **video-only**; stills use the photo curation endpoints above.
 - `video_orientation`: `landscape` | `portrait` — center crop to 16:9 or 9:16 (reels-style). ASR/OCR are for planner/indexing only; they are not burned into renders.
 
+**Planning behavior:** segment *selection* and culling remain deterministic (scores + semantic retrieval). When **`PLANNER_MODEL_ENABLED`** is on (default), the plan’s **`segment_ids`** order is produced by a **text LLM** (`Qwen2.5-7B-Instruct`) so clips can be grouped by source video and story order instead of only highlight/chronological ordering; the plan action **`set_order`** uses **`preserve_planner`** so the renderer concatenates clips in that order. Invalid model output returns **400** with a clear error. Disable with `PLANNER_MODEL_ENABLED=false` for legacy ordering strategies only.
+
 Regenerate endpoint differences:
 
 - Uses `exclude_asset_ids` (note name change vs `excluded_asset_ids`)

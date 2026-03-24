@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..config import settings
 from ..repositories import AssetRepository, PlanRepository, SegmentRepository
 from ..schemas import Asset, ContentRequestCreate, OutputType, PlannerAction, PlannerPlan
 from .search import semantic_search
@@ -298,12 +299,40 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
 
     dedup_ids_set = set(dedup_ids)
     filtered_segments = [row for row in ranked_segments if row["asset_id"] in dedup_ids_set]
-    ranked_segment_ids = [row["segment_id"] for row in filtered_segments[:80]]
+    max_seg = settings.planner_max_segments
+    ranked_segment_ids = [row["segment_id"] for row in filtered_segments[:max_seg]]
 
     order_strategy = _set_order_strategy(request.output_type)
+    rationale_extra = ""
+    if settings.planner_model_enabled and ranked_segment_ids:
+        candidates: list[dict] = []
+        for row in filtered_segments[:max_seg]:
+            aid = row["asset_id"]
+            cue_parts = asset_ctx.get(aid, {}).get("text", [])
+            cue = " ".join(str(x) for x in cue_parts)[:280]
+            candidates.append(
+                {
+                    "segment_id": row["segment_id"],
+                    "asset_id": aid,
+                    "start_s": float(row.get("start_s", 0.0)),
+                    "end_s": float(row.get("end_s", 0.0)),
+                    "score": float(row.get("score", 0.0)),
+                    "cue": cue,
+                }
+            )
+        try:
+            from .plan_sequencer import PlanSequencerError, sequence_playback_order
+
+            ranked_segment_ids, seq_note = sequence_playback_order(candidates, request.prompt)
+            order_strategy = "preserve_planner"
+            rationale_extra = f" Sequencing: {seq_note}"
+        except PlanSequencerError as exc:
+            raise PlannerValidationError(str(exc)) from exc
+
     rationale = (
         f"Plan: output_type={request.output_type.value}, order={order_strategy}, "
         "segment scoring blends lexical overlap + semantic retrieval + cull score."
+        f"{rationale_extra}"
     )
 
     actions = [

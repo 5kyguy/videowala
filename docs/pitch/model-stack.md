@@ -14,6 +14,7 @@ The code references these model IDs/names today (configurable via `backend/.env`
 
 - **VLM**: `Qwen/Qwen2.5-VL-7B-Instruct` (via `VLM_MODEL_ID`; `transformers` + `qwen-vl-utils`)
 - **Embeddings**: `Alibaba-NLP/gte-Qwen2-7B-instruct` (via `EMBEDDING_MODEL_ID`; `sentence-transformers` with `trust_remote_code=True`, dense dim **3584**)
+- **Planner (segment ordering)**: `Qwen/Qwen2.5-7B-Instruct` (via `PLANNER_MODEL_ID`; optional, `PLANNER_MODEL_ENABLED`; reorders selected video segments before render)
 - **Faces**: `insightface` (real inference is gated by `enable_real_face_recognition`)
 - **OCR**: `PaddleOCR` (images only; video frame sampling not implemented yet)
 - **ASR**: `faster-whisper (large-v3-turbo)` (CPU default in code path)
@@ -29,7 +30,7 @@ flowchart TB
   FACE --> CTX
   OCR --> CTX
   ASR --> CTX
-  CTX --> PLAN[Planner]
+  CTX --> PLAN[Planner + optional LLM sequencing]
   PLAN --> RENDER[Renderer (ffmpeg)]
 ```
 

@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from app.config import settings
 from app.db import now_utc, reset_database_for_tests
-from app.repositories import AssetRepository, EventRepository
+from app.repositories import AssetRepository, EventRepository, SegmentRepository
 from pydantic import ValidationError
 
-from app.schemas import Asset, ContentRequestCreate, Event, OutputType, PlannerAction, PlannerPlan
+from app.schemas import Asset, AssetSegment, ContentRequestCreate, Event, OutputType, PlannerAction, PlannerPlan
 from app.services.planner import PlannerValidationError, build_plan, validate_plan
 
 
@@ -167,3 +168,217 @@ def test_include_media_types_filters_to_video_only() -> None:
     select_action = next(a for a in plan.actions if a.action == "select_segments")
     selected = select_action.params["asset_ids"]
     assert selected == ["vid1"]
+
+
+def test_build_plan_stub_sequencer_preserves_shot_continuity() -> None:
+    """With stub models, sequencing uses continuity heuristic: group clips per asset."""
+    saved_stub = settings.stage2_stub_models
+    saved_planner = settings.planner_model_enabled
+    settings.stage2_stub_models = True
+    settings.planner_model_enabled = True
+    try:
+        _ensure_event()
+        now = now_utc()
+        for aid in ("va", "vb"):
+            AssetRepository.create(
+                Asset(
+                    id=aid,
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    media_path=f"media/{aid}.mp4",
+                    media_type="video",
+                    created_at=now,
+                )
+            )
+        SegmentRepository.replace_for_asset(
+            "va",
+            "event_a",
+            [
+                AssetSegment(
+                    id="seg_va1",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="va",
+                    start_s=0.0,
+                    end_s=5.0,
+                    score=0.95,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+                AssetSegment(
+                    id="seg_va2",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="va",
+                    start_s=5.0,
+                    end_s=10.0,
+                    score=0.93,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+            ],
+        )
+        SegmentRepository.replace_for_asset(
+            "vb",
+            "event_a",
+            [
+                AssetSegment(
+                    id="seg_vb1",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="vb",
+                    start_s=0.0,
+                    end_s=5.0,
+                    score=0.94,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+                AssetSegment(
+                    id="seg_vb2",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="vb",
+                    start_s=5.0,
+                    end_s=10.0,
+                    score=0.92,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+            ],
+        )
+        request = ContentRequestCreate(
+            tenant_id="tenant_a",
+            event_id="event_a",
+            output_type=OutputType.highlight_reel,
+            prompt="Create a short preview focused on dancing moments.",
+            target_duration_seconds=60,
+        )
+        context = {
+            "vlm_caption": [{"asset_id": "va", "text": "dance"}, {"asset_id": "vb", "text": "dance"}],
+            "vlm_tags": [],
+            "face_matches": [],
+        }
+        plan = build_plan(request, context)
+        order_action = next(a for a in plan.actions if a.action == "set_order")
+        assert order_action.params.get("strategy") == "preserve_planner"
+        select_action = next(a for a in plan.actions if a.action == "select_segments")
+        ids = select_action.params["segment_ids"]
+        assert ids == ["seg_va1", "seg_va2", "seg_vb1", "seg_vb2"]
+    finally:
+        settings.stage2_stub_models = saved_stub
+        settings.planner_model_enabled = saved_planner
+
+
+def test_build_plan_planner_disabled_uses_legacy_order_strategy() -> None:
+    """When PLANNER_MODEL_ENABLED is false, planner does not reorder segments."""
+    saved_stub = settings.stage2_stub_models
+    saved_planner = settings.planner_model_enabled
+    settings.stage2_stub_models = True
+    settings.planner_model_enabled = False
+    try:
+        _ensure_event()
+        now = now_utc()
+        for aid in ("va", "vb"):
+            AssetRepository.create(
+                Asset(
+                    id=aid,
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    media_path=f"media/{aid}.mp4",
+                    media_type="video",
+                    created_at=now,
+                )
+            )
+        SegmentRepository.replace_for_asset(
+            "va",
+            "event_a",
+            [
+                AssetSegment(
+                    id="seg_va1",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="va",
+                    start_s=0.0,
+                    end_s=5.0,
+                    score=0.95,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+                AssetSegment(
+                    id="seg_va2",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="va",
+                    start_s=5.0,
+                    end_s=10.0,
+                    score=0.93,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+            ],
+        )
+        SegmentRepository.replace_for_asset(
+            "vb",
+            "event_a",
+            [
+                AssetSegment(
+                    id="seg_vb1",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="vb",
+                    start_s=0.0,
+                    end_s=5.0,
+                    score=0.94,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+                AssetSegment(
+                    id="seg_vb2",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="vb",
+                    start_s=5.0,
+                    end_s=10.0,
+                    score=0.92,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                ),
+            ],
+        )
+        request = ContentRequestCreate(
+            tenant_id="tenant_a",
+            event_id="event_a",
+            output_type=OutputType.highlight_reel,
+            prompt="Create a short preview focused on dancing moments.",
+            target_duration_seconds=60,
+        )
+        context = {
+            "vlm_caption": [{"asset_id": "va", "text": "dance"}, {"asset_id": "vb", "text": "dance"}],
+            "vlm_tags": [],
+            "face_matches": [],
+        }
+        plan = build_plan(request, context)
+        order_action = next(a for a in plan.actions if a.action == "set_order")
+        assert order_action.params.get("strategy") == "highlight_diverse"
+        select_action = next(a for a in plan.actions if a.action == "select_segments")
+        ids = select_action.params["segment_ids"]
+        assert ids == ["seg_va1", "seg_vb1", "seg_va2", "seg_vb2"]
+    finally:
+        settings.stage2_stub_models = saved_stub
+        settings.planner_model_enabled = saved_planner

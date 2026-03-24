@@ -45,7 +45,7 @@ from ..services.faces import face_service
 from ..services.ingest import create_asset_record, discover_media_files, purge_event_proxies, register_asset, resolve_ingest_path
 from ..services.indexing import get_event_context, get_event_context_filtered, reindex_face_insights_for_asset
 from ..services.search import semantic_search
-from ..services.planner import build_plan
+from ..services.planner import PlannerValidationError, build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
 from ..services.photo_curation import kept_photo_items_for_export, list_photo_curation_items, score_photo_segments
 from ..services.rendering import UnsafeRenderCommandError, create_render_job, validate_safe_path
@@ -415,7 +415,10 @@ def create_plan(payload: ContentRequestCreate) -> dict:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     context = get_event_context(payload.event_id)
-    plan = build_plan(payload, context)
+    try:
+        plan = build_plan(payload, context)
+    except PlannerValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"plan": plan.model_dump()}
 
 
@@ -430,7 +433,10 @@ def create_render(payload: ContentRequestCreate) -> dict:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     context = get_event_context(payload.event_id)
-    plan = build_plan(payload, context)
+    try:
+        plan = build_plan(payload, context)
+    except PlannerValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         job = create_render_job(
             tenant_id=payload.tenant_id,
@@ -680,7 +686,10 @@ def regenerate_with_feedback(payload: FeedbackUpdate) -> dict:
         video_orientation=payload.video_orientation,
     )
     context = get_event_context(payload.event_id)
-    plan = build_plan(request, context)
+    try:
+        plan = build_plan(request, context)
+    except PlannerValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
         job = create_render_job(
             tenant_id=payload.tenant_id,
