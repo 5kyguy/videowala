@@ -60,6 +60,14 @@ class Settings(BaseModel):
     # Must match the dense output dimension of `embedding_model_id` (gte-Qwen2-7B-instruct → 3584).
     embedding_vector_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_VECTOR_DIM", "3584")))
     vlm_model_id: str = Field(default_factory=lambda: os.getenv("VLM_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct"))
+    # When the primary VLM OOMs on GPU, try this smaller checkpoint (4-bit / fp16 / CPU fallbacks).
+    vlm_fallback_model_id: str = Field(
+        default_factory=lambda: os.getenv("VLM_FALLBACK_MODEL_ID", "Qwen/Qwen2.5-VL-3B-Instruct")
+    )
+    # If bitsandbytes is installed, try 4-bit NF4 on GPU before full fp16 (much lower VRAM).
+    vlm_prefer_quantized: bool = Field(
+        default_factory=lambda: _parse_bool(os.getenv("VLM_PREFER_QUANTIZED"), True)
+    )
     # Lowercase tag names: if any VLM tag matches, OCR runs (after VLM). Comma-separated.
     ocr_trigger_tags: str = Field(
         default_factory=lambda: os.getenv("OCR_TRIGGER_TAGS", "text,signage,document,readable_text")

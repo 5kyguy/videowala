@@ -35,8 +35,11 @@ class AsrService:
         return "faster-whisper (large-v3-turbo)"
 
     def release(self) -> None:
+        # Drop the WhisperModel reference so ctranslate2/CUDA memory can be reclaimed before VLM.
+        model = self._model
         self._model = None
         self._device = None
+        del model
         reclaim_gpu_memory()
 
     def _ensure_model(self) -> None:

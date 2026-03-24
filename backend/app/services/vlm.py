@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import subprocess
 from dataclasses import dataclass
@@ -9,6 +10,8 @@ from typing import Any
 
 from ..config import settings
 from ..gpu_memory import reclaim_gpu_memory
+
+logger = logging.getLogger(__name__)
 
 
 def _stub_caption(name: str) -> str:
@@ -182,21 +185,103 @@ class VlmResult:
     tags_added: list[str]
 
 
+def _bitsandbytes_available() -> bool:
+    try:
+        import bitsandbytes  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda out of memory" in msg
+
+
 class VlmService:
     def __init__(self) -> None:
         self._processor = None
         self._model: Any | None = None
         self._model_id = settings.vlm_model_id
+        self._effective_model_id: str | None = None
 
     @property
     def model_id(self) -> str:
         return self._model_id
 
+    def _result_model_id(self) -> str:
+        return self._effective_model_id or self._model_id
+
     def release(self) -> None:
         """Unload VLM weights so the next serial stage can load a different model."""
         self._model = None
         self._processor = None
+        self._effective_model_id = None
         reclaim_gpu_memory()
+
+    def _drop_model(self) -> None:
+        self._model = None
+        self._processor = None
+        self._effective_model_id = None
+        reclaim_gpu_memory()
+
+    @staticmethod
+    def _load_fp16_cuda(model_id: str) -> tuple[Any, Any]:
+        import torch
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            trust_remote_code=True,
+        )
+        model.to("cuda")
+        model.eval()
+        return processor, model
+
+    @staticmethod
+    def _load_4bit_cuda(model_id: str) -> tuple[Any, Any]:
+        import torch
+        from transformers import AutoProcessor, BitsAndBytesConfig, Qwen2_5_VLForConditionalGeneration
+
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.float16,
+            bnb_4bit_quant_type="nf4",
+        )
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            quantization_config=quantization_config,
+            device_map="auto",
+            trust_remote_code=True,
+        )
+        model.eval()
+        return processor, model
+
+    @staticmethod
+    def _load_cpu_fp32(model_id: str) -> tuple[Any, Any]:
+        import torch
+        from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch.float32,
+            trust_remote_code=True,
+        )
+        model.to("cpu")
+        model.eval()
+        return processor, model
 
     def _ensure_loaded(self) -> None:
         if settings.stage2_stub_models:
@@ -205,7 +290,7 @@ class VlmService:
             return
         try:
             import torch
-            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
+            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration  # noqa: F401
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError(
                 "transformers with Qwen2.5-VL support is required (transformers>=4.48). "
@@ -216,16 +301,54 @@ class VlmService:
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("Install qwen-vl-utils for Qwen2.5-VL: pip install qwen-vl-utils") from exc
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        dtype = torch.float16 if device == "cuda" else torch.float32
-        self._processor = AutoProcessor.from_pretrained(self._model_id, trust_remote_code=True)
-        self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            self._model_id,
-            torch_dtype=dtype,
-            trust_remote_code=True,
-        )
-        self._model.to(device)
-        self._model.eval()
+        primary = self._model_id
+        fallback = settings.vlm_fallback_model_id
+        bnb = _bitsandbytes_available()
+        prefer_q = bool(settings.vlm_prefer_quantized) and bnb
+
+        attempts: list[tuple[str, str, Any]] = []
+
+        def _add_cuda_strategies(hf_id: str, label: str) -> None:
+            """Order: quantized-first (default) or fp16-first, then the other if bnb is available."""
+            if not torch.cuda.is_available():
+                return
+            if prefer_q and bnb:
+                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", self._load_4bit_cuda))
+            attempts.append((hf_id, f"cuda fp16 ({label})", self._load_fp16_cuda))
+            if not prefer_q and bnb:
+                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", self._load_4bit_cuda))
+
+        _add_cuda_strategies(primary, "primary")
+        if fallback != primary:
+            _add_cuda_strategies(fallback, "fallback")
+        attempts.append((fallback, "cpu fp32 (fallback)", self._load_cpu_fp32))
+
+        last_exc: BaseException | None = None
+        for hf_id, label, loader in attempts:
+            try:
+                reclaim_gpu_memory()
+                self._processor, self._model = loader(hf_id)
+                self._effective_model_id = hf_id
+                logger.info(
+                    "VLM ready: model=%s (%s); install bitsandbytes for 4-bit GPU fallbacks",
+                    hf_id,
+                    label,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if torch.cuda.is_available() and _is_cuda_oom(exc):
+                    logger.warning("VLM load OOM for %s (%s): %s", hf_id, label, exc)
+                else:
+                    logger.warning("VLM load failed for %s (%s): %s", hf_id, label, exc)
+                self._drop_model()
+                continue
+
+        raise RuntimeError(
+            f"Could not load any VLM checkpoint (primary={primary!r}, fallback={fallback!r}). "
+            "Try VLM_FALLBACK_MODEL_ID, free GPU memory before VLM, or use a machine with more VRAM. "
+            f"Last error: {last_exc!r}"
+        ) from last_exc
 
     def _generate_one_image(
         self,
@@ -293,7 +416,7 @@ class VlmService:
             st = _stub_tags(base, media_type)
             fp, ad = _split_predefined_tags(st, pre_set)
             return VlmResult(
-                model=self._model_id,
+                model=self._result_model_id(),
                 caption=_stub_caption(base),
                 tags=st,
                 caption_confidence=0.72,
@@ -323,7 +446,7 @@ class VlmService:
             st = _stub_tags(base, media_type)
             fp, ad = _split_predefined_tags(st, pre_set)
             return VlmResult(
-                model=self._model_id,
+                model=self._result_model_id(),
                 caption=_stub_caption(base),
                 tags=st,
                 caption_confidence=None,
@@ -394,7 +517,7 @@ class VlmService:
             except OSError:
                 pass
         return VlmResult(
-            model=self._model_id,
+            model=self._result_model_id(),
             caption=caption,
             tags=tags[:24],
             caption_confidence=best_conf,

@@ -19,6 +19,7 @@ from ..repositories import (
 )
 
 from ..config import settings, ocr_trigger_tags_set
+from ..gpu_memory import prepare_gpu_for_next_stage
 from ..schemas import Asset, AssetInsight, AssetSegment, InsightType
 from ..vector_store import upsert_asset_vector
 from .asr import asr_service
@@ -419,6 +420,8 @@ def index_event_by_model_stages(
         InsightRepository.create_many(batch_asr)
         all_insights.extend(batch_asr)
     asr_service.release()
+    # ASR (faster-whisper) can leave VRAM allocated until GC; free it before the VLM load.
+    prepare_gpu_for_next_stage()
 
     logger.info("Index phase 3/6: VLM over %d asset(s)", n_assets)
     _index_job_progress(index_job_id, 38, f"Vision-language (VLM) · 0/{n_assets}")
@@ -470,6 +473,7 @@ def index_event_by_model_stages(
         InsightRepository.create_many(batch_ocr)
         all_insights.extend(batch_ocr)
     ocr_service.release()
+    prepare_gpu_for_next_stage()
 
     logger.info("Index phase 5–6/6: segments, cull, embeddings for %d asset(s)", n_assets)
     _index_job_progress(index_job_id, 72, f"Embeddings & segments · 0/{n_assets}")
