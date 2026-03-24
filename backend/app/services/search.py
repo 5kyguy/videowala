@@ -5,7 +5,7 @@ from .embeddings import embedding_service
 
 
 def semantic_search(*, tenant_id: str, event_id: str, query: str, limit: int = 20) -> list[dict]:
-    embed = embedding_service.embed_text(query)
+    embed = embedding_service.embed_text(query, for_query=True)
     try:
         hits = search_vectors(
             tenant_id=tenant_id,

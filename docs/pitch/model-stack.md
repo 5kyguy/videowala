@@ -12,8 +12,8 @@ The backend supports two runtime modes, but the intended path for this project i
 
 The code references these model IDs/names today (configurable via `backend/.env`):
 
-- **VLM**: `HuggingFaceTB/SmolVLM2-2.2B-Instruct` (via `VLM_MODEL_ID`)
-- **Embeddings**: `sentence-transformers/all-MiniLM-L6-v2` (via `EMBEDDING_MODEL_ID`)
+- **VLM**: `Qwen/Qwen2.5-VL-7B-Instruct` (via `VLM_MODEL_ID`; `transformers` + `qwen-vl-utils`)
+- **Embeddings**: `Alibaba-NLP/gte-Qwen2-7B-instruct` (via `EMBEDDING_MODEL_ID`; `sentence-transformers` with `trust_remote_code=True`, dense dim **3584**)
 - **Faces**: `insightface` (real inference is gated by `enable_real_face_recognition`)
 - **OCR**: `PaddleOCR` (images only; video frame sampling not implemented yet)
 - **ASR**: `faster-whisper (large-v3-turbo)` (CPU default in code path)
@@ -41,37 +41,26 @@ Use a compositional stack rather than a single multimodal dependency.
 
 ### Multimodal Understanding
 
-Primary: `HuggingFaceTB/SmolVLM2-2.2B-Instruct`
+Primary: `Qwen/Qwen2.5-VL-7B-Instruct`
 
 Why:
 
-- open-weight and practical to self-host
-- handles both images and videos
-- has a much smaller GPU footprint than larger VLMs
-- is sufficient for the MVP goal of indexing, captioning, and request-guided media selection
-
-Lightweight Experiment Path:
-
-- `HuggingFaceTB/SmolVLM2-500M-Video-Instruct` for lower-resource experiments
-
-Evaluation Candidate:
-
-- `Molmo2-8B` only if later benchmarks justify the extra hardware cost
+- strong open vision-language performance for captioning and structured JSON-style outputs
+- used with Hugging Face `transformers` and `qwen-vl-utils` (see `backend/app/services/vlm.py`)
 
 ### Semantic Embeddings
 
-Primary: `SigLIP2`
+Primary: `Alibaba-NLP/gte-Qwen2-7B-instruct`
 
 Why:
 
-- strong open image-text retrieval performance
-- multilingual support is useful for broader event contexts
-- a separate embedding model keeps retrieval cheaper than routing all search through the main VLM
+- high-quality dense text embeddings for retrieval (MTEB-class model family)
+- query vs document prompts: search uses `prompt_name="query"`; indexed text uses plain document encoding (see `backend/app/services/embeddings.py`)
 
 Suggested approach:
 
-- use embeddings for coarse recall
-- use the main VLM and ranking logic for re-ranking and explanation
+- use embeddings for semantic recall over combined caption/ASR/OCR text
+- use the VLM and planner logic for explanations and downstream selection
 
 ### Face Detection And Recognition
 
@@ -130,10 +119,8 @@ Trying to do retrieval, face handling, OCR, and ASR through one multimodal model
 
 ## Selection Summary
 
-- first practical choice: `HuggingFaceTB/SmolVLM2-2.2B-Instruct`
-- first lightweight experiment path: `HuggingFaceTB/SmolVLM2-500M-Video-Instruct`
-- first higher-end evaluation path: `Molmo2-8B`
-- retrieval backbone: `SigLIP2`
+- VLM: `Qwen/Qwen2.5-VL-7B-Instruct`
+- embeddings: `Alibaba-NLP/gte-Qwen2-7B-instruct` (3584-dim dense vectors for pgvector)
 - face stack: `InsightFace`
 - OCR: `PaddleOCR`
 - ASR: `faster-whisper`

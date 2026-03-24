@@ -54,10 +54,12 @@ class Settings(BaseModel):
     # Stage 2 vector store (pgvector)
     pg_dsn: str = Field(default_factory=lambda: os.getenv("PG_DSN", "postgresql://videowala:videowala@localhost:5432/videowala"))
     stage2_stub_models: bool = Field(default_factory=lambda: _parse_bool(os.getenv("DEV_MODE"), False))
-    embedding_model_id: str = Field(default_factory=lambda: os.getenv("EMBEDDING_MODEL_ID", "BAAI/bge-m3"))
-    # Must match the dense output dimension of `embedding_model_id` (BGE-M3 → 1024).
-    embedding_vector_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_VECTOR_DIM", "1024")))
-    vlm_model_id: str = Field(default_factory=lambda: os.getenv("VLM_MODEL_ID", "HuggingFaceTB/SmolVLM2-2.2B-Instruct"))
+    embedding_model_id: str = Field(
+        default_factory=lambda: os.getenv("EMBEDDING_MODEL_ID", "Alibaba-NLP/gte-Qwen2-7B-instruct")
+    )
+    # Must match the dense output dimension of `embedding_model_id` (gte-Qwen2-7B-instruct → 3584).
+    embedding_vector_dim: int = Field(default_factory=lambda: int(os.getenv("EMBEDDING_VECTOR_DIM", "3584")))
+    vlm_model_id: str = Field(default_factory=lambda: os.getenv("VLM_MODEL_ID", "Qwen/Qwen2.5-VL-7B-Instruct"))
     # Lowercase tag names: if any VLM tag matches, OCR runs (after VLM). Comma-separated.
     ocr_trigger_tags: str = Field(
         default_factory=lambda: os.getenv("OCR_TRIGGER_TAGS", "text,signage,document,readable_text")

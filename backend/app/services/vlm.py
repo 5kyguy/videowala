@@ -167,6 +167,11 @@ def _build_vlm_prompt(*, predefined_tags: list[str], event_context: dict | None)
     return "\n".join(lines)
 
 
+def _file_uri(path: Path) -> str:
+    """Qwen2.5-VL expects file:// URIs for local images."""
+    return path.resolve().as_uri()
+
+
 @dataclass(frozen=True)
 class VlmResult:
     model: str
@@ -200,40 +205,75 @@ class VlmService:
             return
         try:
             import torch
-            import transformers
-            from transformers import AutoProcessor
+            from transformers import AutoProcessor, Qwen2_5_VLForConditionalGeneration
         except Exception as exc:  # noqa: BLE001
-            raise RuntimeError("transformers + torch are required for VLM inference") from exc
+            raise RuntimeError(
+                "transformers with Qwen2.5-VL support is required (transformers>=4.48). "
+                "Install: pip install 'transformers>=4.48' qwen-vl-utils accelerate"
+            ) from exc
+        try:
+            from qwen_vl_utils import process_vision_info  # noqa: F401
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("Install qwen-vl-utils for Qwen2.5-VL: pip install qwen-vl-utils") from exc
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
         dtype = torch.float16 if device == "cuda" else torch.float32
         self._processor = AutoProcessor.from_pretrained(self._model_id, trust_remote_code=True)
-        try:
-            from transformers import AutoModelForVision2Seq
-
-            self._model = AutoModelForVision2Seq.from_pretrained(
-                self._model_id,
-                dtype=dtype,
-                trust_remote_code=True,
-            )
-        except Exception as first_exc:  # noqa: BLE001
-            try:
-                from transformers import AutoModelForImageTextToText
-
-                self._model = AutoModelForImageTextToText.from_pretrained(
-                    self._model_id,
-                    dtype=dtype,
-                    trust_remote_code=True,
-                )
-            except Exception as second_exc:  # noqa: BLE001
-                tv = getattr(transformers, "__version__", "unknown")
-                raise RuntimeError(
-                    "Failed to load VLM model. For SmolVLM2 use a recent transformers version (>=4.48 recommended). "
-                    f"Current transformers={tv}, model_id={self._model_id}. "
-                    f"Original errors: {first_exc} | {second_exc}"
-                ) from second_exc
+        self._model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+            self._model_id,
+            torch_dtype=dtype,
+            trust_remote_code=True,
+        )
         self._model.to(device)
         self._model.eval()
+
+    def _generate_one_image(
+        self,
+        *,
+        image_uri: str,
+        prompt: str,
+        device: str,
+    ) -> str:
+        from qwen_vl_utils import process_vision_info
+
+        import torch
+
+        assert self._model is not None and self._processor is not None
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image_uri},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        text = self._processor.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        image_inputs, video_inputs = process_vision_info(messages)
+        inputs = self._processor(
+            text=[text],
+            images=image_inputs,
+            videos=video_inputs,
+            padding=True,
+            return_tensors="pt",
+        )
+        inputs = inputs.to(device)
+        with torch.no_grad():
+            generated_ids = self._model.generate(**inputs, max_new_tokens=512, do_sample=False)
+        input_ids = inputs["input_ids"]
+        generated_ids_trimmed = [
+            out_ids[len(in_ids) :] for in_ids, out_ids in zip(input_ids, generated_ids)
+        ]
+        output_text = self._processor.batch_decode(
+            generated_ids_trimmed,
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False,
+        )[0]
+        return output_text.strip()
 
     def caption_and_tags(
         self,
@@ -291,13 +331,11 @@ class VlmService:
                 tags_added=ad,
             )
 
-        from PIL import Image
         import torch
 
         device = next(self._model.parameters()).device
         prompt = _build_vlm_prompt(predefined_tags=pre, event_context=event_context)
 
-        # Per-frame candidates: (caption, confidence, tags_list)
         candidates: list[tuple[str, float | None, list[str]]] = []
         all_tags_flat: list[str] = []
 
@@ -305,23 +343,11 @@ class VlmService:
             if not image_path.exists():
                 continue
             try:
-                img = Image.open(image_path).convert("RGB")
+                uri = _file_uri(image_path)
+                cleaned = self._generate_one_image(image_uri=uri, prompt=prompt, device=str(device))
             except Exception:
                 continue
-            try:
-                inputs = self._processor(images=img, text=prompt, return_tensors="pt")
-            except ValueError as exc:
-                if "number of images in the text" not in str(exc).lower():
-                    raise
-                inputs = self._processor(images=img, text=f"<image>\n{prompt}", return_tensors="pt")
-            inputs = {k: v.to(device) for k, v in inputs.items()}
-            with torch.no_grad():
-                generated = self._model.generate(**inputs, max_new_tokens=320, do_sample=False)
-            decoded = self._processor.batch_decode(generated, skip_special_tokens=True)[0]
 
-            cleaned = decoded.strip()
-            if cleaned.startswith(prompt.strip()):
-                cleaned = cleaned[len(prompt.strip()) :].lstrip()
             for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
                 if marker in cleaned:
                     cleaned = cleaned.split(marker, 1)[1].strip()
@@ -340,7 +366,6 @@ class VlmService:
             if frame_caption:
                 candidates.append((frame_caption, conf, frame_tags))
 
-        # Pick best frame: highest caption_confidence if any; else longest caption.
         best_caption = ""
         best_conf: float | None = None
         if candidates:

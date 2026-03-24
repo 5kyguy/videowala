@@ -83,13 +83,24 @@ class EmbeddingService:
         if self._model is not None:
             return
         try:
+            import torch
             from sentence_transformers import SentenceTransformer
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("sentence-transformers is required when stage2_stub_models=False") from exc
-        self._model = SentenceTransformer(self._model_id)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._model = SentenceTransformer(
+            self._model_id,
+            trust_remote_code=True,
+            device=device,
+        )
+        # gte-Qwen2 supports long context; cap to avoid pathological RAM use during PoC.
+        self._model.max_seq_length = min(getattr(self._model, "max_seq_length", 8192), 8192)
 
-    def embed_text(self, text: str) -> EmbeddingResult:
-        # BGE-M3: long context; avoid naive 8k tail-only truncation.
+    def embed_text(self, text: str, *, for_query: bool = False) -> EmbeddingResult:
+        """
+        Embed text for retrieval. Use for_query=True for user search queries (instruction-tuned query prompt);
+        for_query=False for indexed document text (captions, ASR, OCR, etc.).
+        """
         normalized = " ".join(text.split()) if text else ""
         max_chars = 24000
         if len(normalized) > max_chars:
@@ -99,8 +110,24 @@ class EmbeddingService:
         if settings.stage2_stub_models:
             return EmbeddingResult(model=self._model_id, vector=_deterministic_vector(f"stub:{normalized}"))
         self._ensure_model()
-        vector = self._model.encode([normalized], normalize_embeddings=True)[0].tolist()
-        return EmbeddingResult(model=self._model_id, vector=[float(x) for x in vector])
+        assert self._model is not None
+        if for_query:
+            encoded = self._model.encode(
+                [normalized],
+                prompt_name="query",
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        else:
+            encoded = self._model.encode(
+                [normalized],
+                normalize_embeddings=True,
+                show_progress_bar=False,
+            )
+        vec = encoded[0]
+        if hasattr(vec, "tolist"):
+            vec = vec.tolist()
+        return EmbeddingResult(model=self._model_id, vector=[float(x) for x in vec])
 
 
 embedding_service = EmbeddingService()
