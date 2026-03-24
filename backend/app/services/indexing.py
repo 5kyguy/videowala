@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
 from dataclasses import dataclass, field
 from typing import Any
@@ -9,12 +10,14 @@ from ..db import now_utc
 from ..repositories import (
     AssetRepository,
     EventRepository,
+    IndexJobRepository,
     InsightRepository,
     PersonReferenceRepository,
     PersonRepository,
     SegmentRepository,
     next_id,
 )
+
 from ..config import settings, ocr_trigger_tags_set
 from ..schemas import Asset, AssetInsight, AssetSegment, InsightType
 from ..vector_store import upsert_asset_vector
@@ -26,6 +29,8 @@ from .ocr import ocr_service
 from .photo_curation import apply_photo_semantic_cull_for_event
 from .privacy import audit_action
 from .vlm import VlmResult, vlm_service
+
+logger = logging.getLogger(__name__)
 
 
 def _face_detections_and_matches(asset: Asset, analysis_media_path: str) -> tuple[list[dict], list[dict]]:
@@ -266,6 +271,13 @@ def _insights_ocr_row(asset: Asset, ocr_items: list[dict], ocr_model: str, run_o
     )
 
 
+def _index_job_progress(job_id: str | None, pct: int) -> None:
+    if not job_id:
+        return
+    pct = max(0, min(100, int(pct)))
+    IndexJobRepository.set_progress(job_id, pct)
+
+
 def _insights_asr_row(asset: Asset, asr_segments: list[dict]) -> AssetInsight:
     return AssetInsight(
         id=next_id("insight"),
@@ -283,6 +295,7 @@ def index_event_by_model_stages(
     asset_ids: list[str],
     *,
     semantic_prompt: str | None = None,
+    index_job_id: str | None = None,
 ) -> list[AssetInsight]:
     """
     One GPU-heavy model at a time: run that stage over all assets, persist insights, unload, then next stage.
@@ -306,12 +319,27 @@ def index_event_by_model_stages(
 
     event_ctx, predefined, ocr_langs = _event_context_fields(event)
 
+    n_assets = len(assets)
+    logger.info(
+        "Index pipeline: event_id=%s assets=%d — prefetch (clear insights + proxies/metadata; can take minutes on huge folders)",
+        event_id,
+        n_assets,
+    )
+    _index_job_progress(index_job_id, 8)
+
     states: list[_AssetIndexState] = []
-    for asset in assets:
+    for i, asset in enumerate(assets):
         _delete_index_insights(asset)
         proxy = ensure_asset_proxy(asset)
         analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
         states.append(_AssetIndexState(asset=asset, proxy=proxy, analysis_media_path=analysis_media_path))
+        if n_assets and (i % 100 == 0 or i == n_assets - 1):
+            _index_job_progress(index_job_id, 8 + int(4 * (i + 1) / n_assets))
+            if i % 200 == 0:
+                logger.info("Index prefetch progress: %d/%d assets", i + 1, n_assets)
+
+    logger.info("Index prefetch done; phase 1/6: face model over %d asset(s)", n_assets)
+    _index_job_progress(index_job_id, 12)
 
     def _iter_states():
         if settings.indexing_show_progress and len(states) > 1:
@@ -327,13 +355,18 @@ def index_event_by_model_stages(
 
     # Phase 1: face model — all assets
     batch_face: list[AssetInsight] = []
-    for st in _iter_states():
+    for fi, st in enumerate(_iter_states()):
         st.detections, st.matches = _face_detections_and_matches(st.asset, st.analysis_media_path)
         batch_face.extend(_insights_face_rows(st.asset, st.detections, st.matches))
+        if n_assets and (fi % 100 == 0 or fi == n_assets - 1):
+            _index_job_progress(index_job_id, 12 + int(16 * (fi + 1) / n_assets))
     if batch_face:
         InsightRepository.create_many(batch_face)
         all_insights.extend(batch_face)
     face_service.release()
+
+    logger.info("Index phase 2/6: ASR (%d video(s))", sum(1 for s in states if s.asset.media_type == "video"))
+    _index_job_progress(index_job_id, 28)
 
     # Phase 2: ASR — transcribe videos; images get an empty ASR insight (same shape as before)
     batch_asr: list[AssetInsight] = []
@@ -348,9 +381,12 @@ def index_event_by_model_stages(
         all_insights.extend(batch_asr)
     asr_service.release()
 
+    logger.info("Index phase 3/6: VLM over %d asset(s)", n_assets)
+    _index_job_progress(index_job_id, 38)
+
     # Phase 3: VLM — all assets
     batch_vlm: list[AssetInsight] = []
-    for st in states:
+    for vi, st in enumerate(states):
         st.vlm = vlm_service.caption_and_tags(
             media_path=st.analysis_media_path,
             media_type=st.asset.media_type,
@@ -360,14 +396,19 @@ def index_event_by_model_stages(
         )
         assert st.vlm is not None
         batch_vlm.extend(_insights_vlm_rows(st.asset, st.vlm))
+        if n_assets and (vi % 50 == 0 or vi == n_assets - 1):
+            _index_job_progress(index_job_id, 38 + int(20 * (vi + 1) / n_assets))
     if batch_vlm:
         InsightRepository.create_many(batch_vlm)
         all_insights.extend(batch_vlm)
     vlm_service.release()
 
+    logger.info("Index phase 4/6: OCR over %d asset(s)", n_assets)
+    _index_job_progress(index_job_id, 58)
+
     # Phase 4: OCR — all assets
     batch_ocr: list[AssetInsight] = []
-    for st in states:
+    for oi, st in enumerate(states):
         assert st.vlm is not None
         st.run_ocr = _should_run_ocr(st.vlm.tags)
         st.ocr_items, st.ocr_model = ocr_service.extract(
@@ -376,14 +417,19 @@ def index_event_by_model_stages(
             ocr_languages=ocr_langs,
         )
         batch_ocr.append(_insights_ocr_row(st.asset, st.ocr_items, st.ocr_model, st.run_ocr))
+        if n_assets and (oi % 100 == 0 or oi == n_assets - 1):
+            _index_job_progress(index_job_id, 58 + int(14 * (oi + 1) / n_assets))
     if batch_ocr:
         InsightRepository.create_many(batch_ocr)
         all_insights.extend(batch_ocr)
     ocr_service.release()
 
+    logger.info("Index phase 5–6/6: segments, cull, embeddings for %d asset(s)", n_assets)
+    _index_job_progress(index_job_id, 72)
+
     # Phase 5–6: segments + cull (CPU), then embedding model once for all assets
     text_source_limit = 8000
-    for st in states:
+    for ei, st in enumerate(states):
         assert st.vlm is not None
         asr_text_joined = " ".join([seg.get("text", "") for seg in st.asr_segments]).strip()
         ocr_text_joined = " ".join([item.get("text", "") for item in st.ocr_items]).strip()
@@ -456,6 +502,8 @@ def index_event_by_model_stages(
         )
         InsightRepository.create_many([sem_insight])
         all_insights.append(sem_insight)
+        if n_assets and (ei % 100 == 0 or ei == n_assets - 1):
+            _index_job_progress(index_job_id, 72 + int(23 * (ei + 1) / n_assets))
         pipeline = "image" if st.asset.media_type == "image" else "video"
         insight_count = 8
         audit_action(
@@ -466,6 +514,7 @@ def index_event_by_model_stages(
         )
 
     embedding_service.release()
+    logger.info("Index pipeline finished: event_id=%s assets=%d insights=%d", event_id, n_assets, len(all_insights))
 
     if semantic_prompt and semantic_prompt.strip() and any(a.media_type == "image" for a in assets):
         apply_photo_semantic_cull_for_event(

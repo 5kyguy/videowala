@@ -53,7 +53,18 @@ def run_index_job(job_id: str) -> int:
     if job is None:
         raise KeyError(f"Index job not found: {job_id}")
     asset_ids = list(job.staged_asset_ids) if job.staged_asset_ids else [job.asset_id]
-    insights = index_event_by_model_stages(asset_ids, semantic_prompt=job.semantic_prompt)
+    logger.info(
+        "Index job running job_id=%s event_id=%s assets=%d staged=%s",
+        job_id,
+        job.event_id,
+        len(asset_ids),
+        bool(job.staged_asset_ids),
+    )
+    insights = index_event_by_model_stages(
+        asset_ids,
+        semantic_prompt=job.semantic_prompt,
+        index_job_id=job.id,
+    )
     return len(insights)
 
 
@@ -87,7 +98,6 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
         def _task() -> None:
             IndexJobRepository.mark_running(job.id)
             try:
-                IndexJobRepository.set_progress(job.id, 30)
                 count = run_index_job(job.id)
                 IndexJobRepository.mark_completed(job.id, count)
                 _emit_indexing_progress_log(asset.event_id)
@@ -159,7 +169,6 @@ def submit_staged_index_job(
         def _task() -> None:
             IndexJobRepository.mark_running(job.id)
             try:
-                IndexJobRepository.set_progress(job.id, 30)
                 count = run_index_job(job.id)
                 IndexJobRepository.mark_completed(job.id, count)
                 _emit_indexing_progress_log(event_id)
