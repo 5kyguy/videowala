@@ -22,6 +22,8 @@ function partitionPhotoCuration(items: PhotoCurationItem[]) {
 
 const PROFILE_STORAGE_KEY = "videowala_profiles";
 const DEFAULT_OUTPUT_TYPE: OutputType = "highlight_reel";
+/** Longest edge for album grid images (full files stay available via ZIP export). */
+const ALBUM_MEDIA_PREVIEW_MAX_EDGE = 640;
 
 function asErrorMessage(error: unknown): string {
   if (error instanceof ApiError) return `HTTP ${error.status}: ${error.message}`;
@@ -588,9 +590,8 @@ export default function App() {
                 </div>
               </div>
               <div className="callout callout-warning">
-                <strong>Heads up — data transfer:</strong> Opening the album page fetches full-resolution images from
-                the server and consumes bandwidth, similar to downloading the ZIP. Only open it when you need to
-                review photos interactively.
+                <strong>Heads up — data transfer:</strong> The album loads scaled previews for on-screen review. The
+                ZIP export still contains original-resolution files.
               </div>
               <div className="workflow-grid">
                 <label>
@@ -621,7 +622,9 @@ export default function App() {
                         {photoParts.kept.map((item) => (
                           <figure key={item.segment_id} className="photo-curation-thumb">
                             <img
-                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId, {
+                                maxEdge: ALBUM_MEDIA_PREVIEW_MAX_EDGE
+                              })}
                               alt=""
                               loading="lazy"
                             />
@@ -641,7 +644,9 @@ export default function App() {
                         {photoParts.duplicates.map((item) => (
                           <figure key={item.segment_id} className="photo-curation-thumb is-dim">
                             <img
-                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId, {
+                                maxEdge: ALBUM_MEDIA_PREVIEW_MAX_EDGE
+                              })}
                               alt=""
                               loading="lazy"
                             />
@@ -661,7 +666,9 @@ export default function App() {
                         {photoParts.rejected.map((item) => (
                           <figure key={item.segment_id} className="photo-curation-thumb is-dim">
                             <img
-                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId)}
+                              src={api.getAssetMediaUrl(selectedEventId, item.asset_id, tenantId, {
+                                maxEdge: ALBUM_MEDIA_PREVIEW_MAX_EDGE
+                              })}
                               alt=""
                               loading="lazy"
                             />
@@ -793,8 +800,7 @@ export default function App() {
             ) : photoCuration ? (
               <p className="muted">
                 {photoCuration.items.length} indexed image(s). Use{" "}
-                <strong>Open album page</strong> to review them — opening the album page fetches images and
-                consumes server bandwidth, similar to downloading the ZIP.
+                <strong>Open album page</strong> for scaled previews; download the ZIP for original files.
               </p>
             ) : (
               <p className="muted">Loading photo picks…</p>

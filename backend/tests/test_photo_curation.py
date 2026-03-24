@@ -201,6 +201,12 @@ def test_asset_media_allows_file_under_project_root() -> None:
         )
         assert r.status_code == 200
         assert r.headers.get("content-type", "").startswith("image/")
+        r_preview = client.get(
+            "/events/ev_media_ok/assets/img_ok/media",
+            params={"tenant_id": "t1", "max_edge": 64},
+        )
+        assert r_preview.status_code == 200
+        assert r_preview.headers.get("content-type", "").startswith("image/")
     finally:
         media_path.unlink(missing_ok=True)
 

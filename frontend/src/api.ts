@@ -217,8 +217,19 @@ export function createApiClient(config: ApiClientConfig) {
         baseUrl,
         `/events/${encodeURIComponent(eventId)}/photos/curation?tenant_id=${encodeURIComponent(tenantId)}`
       ),
-    getAssetMediaUrl: (eventId: string, assetId: string, tenantId: string) =>
-      `${baseUrl}/events/${encodeURIComponent(eventId)}/assets/${encodeURIComponent(assetId)}/media?tenant_id=${encodeURIComponent(tenantId)}`,
+    /** Use `maxEdge` for album-style previews; omit for full-resolution (e.g. exports use originals on the server). */
+    getAssetMediaUrl: (
+      eventId: string,
+      assetId: string,
+      tenantId: string,
+      options?: { maxEdge?: number }
+    ) => {
+      const params = new URLSearchParams({ tenant_id: tenantId });
+      if (options?.maxEdge != null) {
+        params.set("max_edge", String(options.maxEdge));
+      }
+      return `${baseUrl}/events/${encodeURIComponent(eventId)}/assets/${encodeURIComponent(assetId)}/media?${params.toString()}`;
+    },
     exportKeptPhotosUrl: (eventId: string, tenantId: string) =>
       `${baseUrl}/events/${encodeURIComponent(eventId)}/photos/export-kept?tenant_id=${encodeURIComponent(tenantId)}`
   };

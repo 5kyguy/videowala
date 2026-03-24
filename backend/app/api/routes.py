@@ -4,11 +4,12 @@ import logging
 import mimetypes
 import sys
 import zipfile
+from io import BytesIO
 from pathlib import Path
 import shutil
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, Response
 
 from ..config import PROJECT_ROOT, settings
 from ..db import now_utc
@@ -96,6 +97,32 @@ def _assert_media_path_allowed(path: Path) -> None:
             status_code=400,
             detail="Media file path is outside allowed directories (project root or configured storage).",
         )
+
+
+def _image_bytes_scaled_max_edge(path: Path, max_edge: int) -> tuple[bytes, str]:
+    """Resize so longest edge is at most `max_edge` (aspect preserved). JPEG for opaque, PNG if alpha."""
+    from PIL import Image, ImageOps
+
+    with Image.open(path) as im:
+        im.load()
+        if getattr(im, "n_frames", 1) > 1:
+            im.seek(0)
+        try:
+            im = ImageOps.exif_transpose(im)
+        except Exception:
+            pass
+        im.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+        buf = BytesIO()
+        has_alpha = im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info)
+        if im.mode == "P" and "transparency" in im.info:
+            im = im.convert("RGBA")
+            has_alpha = True
+        if has_alpha:
+            im.save(buf, format="PNG", optimize=True)
+            return buf.getvalue(), "image/png"
+        rgb = im.convert("RGB")
+        rgb.save(buf, format="JPEG", quality=88, optimize=True)
+        return buf.getvalue(), "image/jpeg"
 
 
 def _assert_path_within_root(path: Path, root: Path) -> None:
@@ -525,8 +552,18 @@ def run_photo_curation(event_id: str, payload: PhotoCurationRequest) -> PhotoCur
     return PhotoCurationListResponse(event_id=event_id, items=items)
 
 
-@router.get("/events/{event_id}/assets/{asset_id}/media")
-def get_event_asset_media(event_id: str, asset_id: str, tenant_id: str) -> FileResponse:
+@router.get("/events/{event_id}/assets/{asset_id}/media", response_model=None)
+def get_event_asset_media(
+    event_id: str,
+    asset_id: str,
+    tenant_id: str,
+    max_edge: int | None = Query(
+        None,
+        ge=64,
+        le=4096,
+        description="If set, return a scaled preview (longest edge ≤ this value). Omit for full-resolution file.",
+    ),
+) -> FileResponse | Response:
     event = EventRepository.get(event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found.")
@@ -550,6 +587,12 @@ def get_event_asset_media(event_id: str, asset_id: str, tenant_id: str) -> FileR
     ext = path.suffix.lower()
     if ext not in _ALLOWED_EVENT_ASSET_IMAGE_SUFFIXES:
         raise HTTPException(status_code=400, detail="Unsupported image extension for browser delivery.")
+    if max_edge is not None:
+        try:
+            body, media_type = _image_bytes_scaled_max_edge(path, max_edge)
+        except OSError as exc:
+            raise HTTPException(status_code=400, detail=f"Could not build image preview: {exc}") from exc
+        return Response(content=body, media_type=media_type)
     media_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
     return FileResponse(path, media_type=media_type, filename=path.name)
 

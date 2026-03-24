@@ -80,6 +80,9 @@ describe("api client", () => {
     expect(client.getAssetMediaUrl("event_x", "asset_y", "tenant_a")).toBe(
       "http://localhost:8000/events/event_x/assets/asset_y/media?tenant_id=tenant_a"
     );
+    expect(client.getAssetMediaUrl("event_x", "asset_y", "tenant_a", { maxEdge: 1280 })).toBe(
+      "http://localhost:8000/events/event_x/assets/asset_y/media?tenant_id=tenant_a&max_edge=1280"
+    );
   });
 
   it("calls delete endpoints with tenant scope", async () => {
