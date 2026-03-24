@@ -666,6 +666,14 @@ class RenderRepository:
 
 
 def _index_job_from_row(row: sqlite3.Row) -> IndexJob:
+    staged: list[str] | None = None
+    if "staged_asset_ids_json" in row.keys() and row["staged_asset_ids_json"]:
+        try:
+            raw = decode_json(row["staged_asset_ids_json"])
+            if isinstance(raw, list):
+                staged = [str(x) for x in raw]
+        except Exception:
+            staged = None
     return IndexJob(
         id=row["id"],
         tenant_id=row["tenant_id"],
@@ -677,6 +685,7 @@ def _index_job_from_row(row: sqlite3.Row) -> IndexJob:
         error_message=row["error_message"],
         created_at=from_iso(row["created_at"]),
         semantic_prompt=row["semantic_prompt"] if "semantic_prompt" in row.keys() and row["semantic_prompt"] is not None else None,
+        staged_asset_ids=staged,
     )
 
 
@@ -684,11 +693,12 @@ class IndexJobRepository:
     @staticmethod
     def create(job: IndexJob) -> IndexJob:
         with db_cursor() as cur:
+            staged_json = encode_json(job.staged_asset_ids) if job.staged_asset_ids else None
             cur.execute(
                 """
                 INSERT INTO index_jobs
-                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at, semantic_prompt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?)
+                (id, tenant_id, event_id, asset_id, status, progress_percent, insights_generated, error_message, created_at, started_at, finished_at, semantic_prompt, staged_asset_ids_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
                 """,
                 (
                     job.id,
@@ -701,6 +711,7 @@ class IndexJobRepository:
                     job.error_message,
                     to_iso(job.created_at),
                     job.semantic_prompt,
+                    staged_json,
                 ),
             )
         return job

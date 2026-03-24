@@ -8,7 +8,7 @@ from ..config import settings
 from ..db import now_utc
 from ..repositories import AssetRepository, IndexJobRepository, RenderRepository, next_id
 from ..schemas import IndexJob
-from ..services.indexing import index_asset
+from ..services.indexing import index_event_by_model_stages
 from ..services.rendering import execute_render_job
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,12 @@ def _emit_indexing_progress_log(event_id: str) -> None:
     )
 
 
-def run_index_job(asset_id: str, semantic_prompt: str | None = None) -> int:
-    insights = index_asset(asset_id, semantic_prompt=semantic_prompt)
+def run_index_job(job_id: str) -> int:
+    job = IndexJobRepository.get(job_id)
+    if job is None:
+        raise KeyError(f"Index job not found: {job_id}")
+    asset_ids = list(job.staged_asset_ids) if job.staged_asset_ids else [job.asset_id]
+    insights = index_event_by_model_stages(asset_ids, semantic_prompt=job.semantic_prompt)
     return len(insights)
 
 
@@ -75,6 +79,7 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
             error_message=None,
             created_at=now_utc(),
             semantic_prompt=semantic_prompt,
+            staged_asset_ids=None,
         )
         IndexJobRepository.create(job)
         _INFLIGHT_INDEX[asset_id] = job.id
@@ -83,7 +88,7 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
             IndexJobRepository.mark_running(job.id)
             try:
                 IndexJobRepository.set_progress(job.id, 30)
-                count = run_index_job(asset.id, semantic_prompt=job.semantic_prompt)
+                count = run_index_job(job.id)
                 IndexJobRepository.mark_completed(job.id, count)
                 _emit_indexing_progress_log(asset.event_id)
             except Exception as exc:  # noqa: BLE001
@@ -100,6 +105,79 @@ def submit_index_job(asset_id: str, semantic_prompt: str | None = None) -> Index
                 with _LOCK:
                     if _INFLIGHT_INDEX.get(asset.id) == job.id:
                         _INFLIGHT_INDEX.pop(asset.id, None)
+
+        _EXECUTOR.submit(_task)
+        return job
+
+
+def submit_staged_index_job(
+    tenant_id: str,
+    event_id: str,
+    staged_asset_ids: list[str],
+    semantic_prompt: str | None = None,
+) -> IndexJob:
+    """One index job that runs the GPU pipeline model-by-model across all listed assets."""
+    if not staged_asset_ids:
+        raise ValueError("staged_asset_ids must be non-empty")
+    first = AssetRepository.get(staged_asset_ids[0])
+    if first is None:
+        raise KeyError(f"Asset not found: {staged_asset_ids[0]}")
+    if first.tenant_id != tenant_id or first.event_id != event_id:
+        raise ValueError("Staged assets must match tenant_id and event_id")
+    for aid in staged_asset_ids[1:]:
+        a = AssetRepository.get(aid)
+        if a is None:
+            raise KeyError(f"Asset not found: {aid}")
+        if a.tenant_id != tenant_id or a.event_id != event_id:
+            raise ValueError("All staged assets must belong to the same event and tenant")
+
+    with _LOCK:
+        for aid in staged_asset_ids:
+            existing_id = _INFLIGHT_INDEX.get(aid)
+            if existing_id:
+                existing = IndexJobRepository.get(existing_id)
+                if existing is not None and existing.status in {"queued", "running"}:
+                    return existing
+
+        job = IndexJob(
+            id=next_id("idxjob"),
+            tenant_id=tenant_id,
+            event_id=event_id,
+            asset_id=staged_asset_ids[0],
+            status="queued",
+            progress_percent=0,
+            insights_generated=0,
+            error_message=None,
+            created_at=now_utc(),
+            semantic_prompt=semantic_prompt,
+            staged_asset_ids=staged_asset_ids,
+        )
+        IndexJobRepository.create(job)
+        for aid in staged_asset_ids:
+            _INFLIGHT_INDEX[aid] = job.id
+
+        def _task() -> None:
+            IndexJobRepository.mark_running(job.id)
+            try:
+                IndexJobRepository.set_progress(job.id, 30)
+                count = run_index_job(job.id)
+                IndexJobRepository.mark_completed(job.id, count)
+                _emit_indexing_progress_log(event_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Index job failed job_id=%s event_id=%s staged=%s: %s",
+                    job.id,
+                    event_id,
+                    staged_asset_ids,
+                    exc,
+                )
+                IndexJobRepository.mark_failed(job.id, str(exc))
+                _emit_indexing_progress_log(event_id)
+            finally:
+                with _LOCK:
+                    for aid in staged_asset_ids:
+                        if _INFLIGHT_INDEX.get(aid) == job.id:
+                            _INFLIGHT_INDEX.pop(aid, None)
 
         _EXECUTOR.submit(_task)
         return job

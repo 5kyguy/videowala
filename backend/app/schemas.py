@@ -235,6 +235,10 @@ class IndexJob(BaseModel):
         default=None,
         description="Optional ingest-time prompt stored on the job for image semantic culling.",
     )
+    staged_asset_ids: list[str] | None = Field(
+        default=None,
+        description="When set, one index job runs model-by-model across all listed assets (batch ingest).",
+    )
 
 
 class FeedbackUpdate(BaseModel):

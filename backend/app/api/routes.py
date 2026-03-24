@@ -51,7 +51,7 @@ from ..services.planner import PlannerValidationError, build_plan
 from ..services.privacy import assert_tenant_scope, audit_action, cleanup_tenant_scratch
 from ..services.photo_curation import kept_photo_items_for_export, list_photo_curation_items, score_photo_segments
 from ..services.rendering import UnsafeRenderCommandError, create_render_job, validate_safe_path
-from ..workers.index_worker import submit_index_job, submit_render_job
+from ..workers.index_worker import submit_index_job, submit_render_job, submit_staged_index_job
 
 logger = logging.getLogger(__name__)
 
@@ -266,32 +266,53 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
             except ImportError:
                 pass
         failed = 0
+        staged_ids: list[str] = []
         for abs_path, mtype in file_iter:
-            asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
             try:
-                job = submit_index_job(asset.id, semantic_prompt=payload.semantic_prompt)
-                assets_out.append(
-                    {
-                        "asset_id": asset.id,
-                        "media_path": str(abs_path),
-                        "media_type": mtype,
-                        "insights_generated": 0,
-                        "index_job_id": job.id,
-                        "error": None,
-                    }
-                )
+                asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
-                logger.exception("Indexing failed for %s", abs_path)
+                logger.exception("Asset create failed for %s", abs_path)
                 assets_out.append(
                     {
-                        "asset_id": asset.id,
                         "media_path": str(abs_path),
                         "media_type": mtype,
                         "insights_generated": 0,
                         "error": str(exc),
                     }
                 )
+                continue
+            staged_ids.append(asset.id)
+            assets_out.append(
+                {
+                    "asset_id": asset.id,
+                    "media_path": str(abs_path),
+                    "media_type": mtype,
+                    "insights_generated": 0,
+                    "index_job_id": None,
+                    "error": None,
+                }
+            )
+        batch_job = None
+        if staged_ids:
+            try:
+                batch_job = submit_staged_index_job(
+                    payload.tenant_id,
+                    payload.event_id,
+                    staged_ids,
+                    semantic_prompt=payload.semantic_prompt,
+                )
+            except Exception as exc:  # noqa: BLE001
+                failed += len(staged_ids)
+                logger.exception("Staged index job failed for event %s", payload.event_id)
+                for row in assets_out:
+                    if row.get("error") is None:
+                        row["error"] = str(exc)
+            else:
+                jid = batch_job.id
+                for row in assets_out:
+                    if row.get("error") is None:
+                        row["index_job_id"] = jid
         audit_action(
             payload.tenant_id,
             payload.event_id,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+from dataclasses import dataclass, field
+from typing import Any
 
 from ..db import now_utc
 from ..repositories import (
@@ -22,7 +25,7 @@ from .ingest import ensure_asset_proxy
 from .ocr import ocr_service
 from .photo_curation import apply_photo_semantic_cull_for_event
 from .privacy import audit_action
-from .vlm import vlm_service
+from .vlm import VlmResult, vlm_service
 
 
 def _face_detections_and_matches(asset: Asset, analysis_media_path: str) -> tuple[list[dict], list[dict]]:
@@ -151,293 +154,22 @@ def _event_context_fields(event) -> tuple[dict | None, list[str], list[str]]:
     return event_ctx, predefined, ocr_langs
 
 
-def index_image_asset(asset_id: str, *, semantic_prompt: str | None = None) -> list[AssetInsight]:
-    """Image-only indexing: serial model stages with explicit unload between heavy models."""
-    asset = AssetRepository.get(asset_id)
-    if asset is None:
-        raise KeyError(f"Asset not found: {asset_id}")
-    if asset.media_type != "image":
-        raise ValueError(f"Expected image asset, got media_type={asset.media_type!r}")
-
-    event = EventRepository.get(asset.event_id)
-    _delete_index_insights(asset)
-
-    proxy = ensure_asset_proxy(asset)
-    analysis_media_path = asset.media_path
-
-    detections, matches = _face_detections_and_matches(asset, analysis_media_path)
-    face_service.release()
-
-    asr_segments: list[dict] = []
-    asr_text_joined = ""
-
-    event_ctx, predefined, ocr_langs = _event_context_fields(event)
-
-    vlm = vlm_service.caption_and_tags(
-        media_path=analysis_media_path,
-        media_type="image",
-        scratch_root=settings.scratch_root,
-        event_context=event_ctx,
-        predefined_tags=predefined,
-    )
-    vlm_service.release()
-
-    run_ocr = _should_run_ocr(vlm.tags)
-    ocr_items, ocr_model = ocr_service.extract(
-        analysis_media_path,
-        run_ocr=run_ocr,
-        ocr_languages=ocr_langs,
-    )
-    ocr_service.release()
-    ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
-
-    duration_s = float(proxy.manifest.get("duration_s", 0.0) or 0.0)
-    base_score = _base_cull_score(
-        asset,
-        proxy.manifest,
-        asr_segments,
-        ocr_items,
-        caption_confidence=vlm.caption_confidence,
-        vlm_tags=vlm.tags,
-    )
-    segments = [
-        AssetSegment(
-            id=next_id("seg"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            start_s=start_s,
-            end_s=end_s,
-            score=base_score,
-            keep=True,
-            is_duplicate=False,
-            reject_reasons=[],
-            created_at=now_utc(),
-        )
-        for (start_s, end_s) in _segment_for_asset(asset, duration_s)
-    ]
-    SegmentRepository.replace_for_asset(asset.id, asset.event_id, segments)
-
-    insights = _build_insight_rows(
-        asset=asset,
-        proxy=proxy,
-        segments=segments,
-        vlm=vlm,
-        detections=detections,
-        matches=matches,
-        asr_segments=asr_segments,
-        ocr_items=ocr_items,
-        ocr_model=ocr_model,
-        run_ocr=run_ocr,
-        base_score=base_score,
-        asr_text_joined=asr_text_joined,
-        ocr_text_joined=ocr_text_joined,
-    )
-
-    people_names = _people_names_from_matches(matches)
-    combined = build_embedding_text(
-        caption=vlm.caption,
-        tags=vlm.tags,
-        people_names=people_names,
-        asr=asr_text_joined,
-        ocr=ocr_text_joined,
-    )
-    embed = embedding_service.embed_text(combined)
-    embedding_service.release()
-    text_source_limit = 8000
-    try:
-        row_id = upsert_asset_vector(
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            kind="multi",
-            vector=embed.vector,
-            text_source=combined[:text_source_limit] if combined else None,
-        )
-        enabled = True
-    except Exception:
-        row_id = 0
-        enabled = False
-    insights.append(
-        AssetInsight(
-            id=next_id("insight"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            insight_type=InsightType.semantic_embedding,
-            payload={
-                "kind": "multi",
-                "vector_ref": {"store": "pgvector", "row_id": row_id},
-                "model": embed.model,
-                "enabled": enabled,
-            },
-            confidence=0.5 if combined else 0.0,
-            created_at=now_utc(),
-        )
-    )
-
-    InsightRepository.create_many(insights)
-    audit_action(asset.tenant_id, asset.event_id, "asset_indexed", {"asset_id": asset.id, "insight_count": len(insights), "pipeline": "image"})
-
-    if semantic_prompt and semantic_prompt.strip():
-        apply_photo_semantic_cull_for_event(
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            prompt=semantic_prompt.strip(),
-            cull_percent=settings.image_index_semantic_cull_percent,
-        )
-
-    return insights
+@dataclass
+class _AssetIndexState:
+    asset: Asset
+    proxy: Any
+    analysis_media_path: str
+    detections: list[dict] = field(default_factory=list)
+    matches: list[dict] = field(default_factory=list)
+    asr_segments: list[dict] = field(default_factory=list)
+    vlm: VlmResult | None = None
+    ocr_items: list[dict] = field(default_factory=list)
+    ocr_model: str = ""
+    run_ocr: bool = False
 
 
-def index_video_asset(asset_id: str) -> list[AssetInsight]:
-    """Video-only indexing: proxy, ASR, VLM, OCR, embeddings with serial model unload between stages."""
-    asset = AssetRepository.get(asset_id)
-    if asset is None:
-        raise KeyError(f"Asset not found: {asset_id}")
-    if asset.media_type != "video":
-        raise ValueError(f"Expected video asset, got media_type={asset.media_type!r}")
-
-    event = EventRepository.get(asset.event_id)
-    _delete_index_insights(asset)
-
-    proxy = ensure_asset_proxy(asset)
-    analysis_media_path = proxy.proxy_path
-
-    detections, matches = _face_detections_and_matches(asset, analysis_media_path)
-    face_service.release()
-
-    asr_segments = asr_service.transcribe(analysis_media_path)
-    asr_service.release()
-    asr_text_joined = " ".join([seg.get("text", "") for seg in asr_segments]).strip()
-
-    event_ctx, predefined, ocr_langs = _event_context_fields(event)
-
-    vlm = vlm_service.caption_and_tags(
-        media_path=analysis_media_path,
-        media_type="video",
-        scratch_root=settings.scratch_root,
-        event_context=event_ctx,
-        predefined_tags=predefined,
-    )
-    vlm_service.release()
-
-    run_ocr = _should_run_ocr(vlm.tags)
-    ocr_items, ocr_model = ocr_service.extract(
-        analysis_media_path,
-        run_ocr=run_ocr,
-        ocr_languages=ocr_langs,
-    )
-    ocr_service.release()
-    ocr_text_joined = " ".join([item.get("text", "") for item in ocr_items]).strip()
-
-    duration_s = float(proxy.manifest.get("duration_s", 0.0) or 0.0)
-    base_score = _base_cull_score(
-        asset,
-        proxy.manifest,
-        asr_segments,
-        ocr_items,
-        caption_confidence=vlm.caption_confidence,
-        vlm_tags=vlm.tags,
-    )
-    segments = [
-        AssetSegment(
-            id=next_id("seg"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            start_s=start_s,
-            end_s=end_s,
-            score=base_score,
-            keep=True,
-            is_duplicate=False,
-            reject_reasons=[],
-            created_at=now_utc(),
-        )
-        for (start_s, end_s) in _segment_for_asset(asset, duration_s)
-    ]
-    SegmentRepository.replace_for_asset(asset.id, asset.event_id, segments)
-
-    insights = _build_insight_rows(
-        asset=asset,
-        proxy=proxy,
-        segments=segments,
-        vlm=vlm,
-        detections=detections,
-        matches=matches,
-        asr_segments=asr_segments,
-        ocr_items=ocr_items,
-        ocr_model=ocr_model,
-        run_ocr=run_ocr,
-        base_score=base_score,
-        asr_text_joined=asr_text_joined,
-        ocr_text_joined=ocr_text_joined,
-    )
-
-    people_names = _people_names_from_matches(matches)
-    combined = build_embedding_text(
-        caption=vlm.caption,
-        tags=vlm.tags,
-        people_names=people_names,
-        asr=asr_text_joined,
-        ocr=ocr_text_joined,
-    )
-    embed = embedding_service.embed_text(combined)
-    embedding_service.release()
-    text_source_limit = 8000
-    try:
-        row_id = upsert_asset_vector(
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            kind="multi",
-            vector=embed.vector,
-            text_source=combined[:text_source_limit] if combined else None,
-        )
-        enabled = True
-    except Exception:
-        row_id = 0
-        enabled = False
-    insights.append(
-        AssetInsight(
-            id=next_id("insight"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            insight_type=InsightType.semantic_embedding,
-            payload={
-                "kind": "multi",
-                "vector_ref": {"store": "pgvector", "row_id": row_id},
-                "model": embed.model,
-                "enabled": enabled,
-            },
-            confidence=0.5 if combined else 0.0,
-            created_at=now_utc(),
-        )
-    )
-
-    InsightRepository.create_many(insights)
-    audit_action(asset.tenant_id, asset.event_id, "asset_indexed", {"asset_id": asset.id, "insight_count": len(insights), "pipeline": "video"})
-    return insights
-
-
-def _build_insight_rows(
-    *,
-    asset: Asset,
-    proxy,
-    segments: list[AssetSegment],
-    vlm,
-    detections: list[dict],
-    matches: list[dict],
-    asr_segments: list[dict],
-    ocr_items: list[dict],
-    ocr_model: str,
-    run_ocr: bool,
-    base_score: float,
-    asr_text_joined: str,
-    ocr_text_joined: str,
-) -> list[AssetInsight]:
-    insights: list[AssetInsight] = [
+def _insights_vlm_rows(asset: Asset, vlm: VlmResult) -> list[AssetInsight]:
+    return [
         AssetInsight(
             id=next_id("insight"),
             tenant_id=asset.tenant_id,
@@ -467,6 +199,11 @@ def _build_insight_rows(
             confidence=0.62,
             created_at=now_utc(),
         ),
+    ]
+
+
+def _insights_face_rows(asset: Asset, detections: list[dict], matches: list[dict]) -> list[AssetInsight]:
+    return [
         AssetInsight(
             id=next_id("insight"),
             tenant_id=asset.tenant_id,
@@ -487,56 +224,286 @@ def _build_insight_rows(
             confidence=0.51,
             created_at=now_utc(),
         ),
-        AssetInsight(
-            id=next_id("insight"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            insight_type=InsightType.cull_metrics,
-            payload={
-                "base_score": base_score,
-                "proxy_path": proxy.proxy_path,
-                "segment_count": len(segments),
-                "segment_signatures": [
-                    _segment_signature(asset, seg.start_s, seg.end_s)
-                    for seg in segments
-                ],
-            },
-            confidence=0.55,
-            created_at=now_utc(),
-        ),
-        AssetInsight(
-            id=next_id("insight"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            insight_type=InsightType.ocr_text,
-            payload={"items": ocr_items, "model": ocr_model, "skipped": not run_ocr},
-            confidence=0.6 if ocr_items else 0.0,
-            created_at=now_utc(),
-        ),
-        AssetInsight(
-            id=next_id("insight"),
-            tenant_id=asset.tenant_id,
-            event_id=asset.event_id,
-            asset_id=asset.id,
-            insight_type=InsightType.asr_transcript,
-            payload={"segments": asr_segments, "model": asr_service.model_name},
-            confidence=0.65 if asr_segments else 0.0,
-            created_at=now_utc(),
-        ),
     ]
-    return insights
 
 
-def index_asset(asset_id: str, *, semantic_prompt: str | None = None) -> list[AssetInsight]:
-    """Dispatch to image or video pipeline."""
+def _insights_cull_row(
+    asset: Asset,
+    proxy,
+    segments: list[AssetSegment],
+    base_score: float,
+) -> AssetInsight:
+    return AssetInsight(
+        id=next_id("insight"),
+        tenant_id=asset.tenant_id,
+        event_id=asset.event_id,
+        asset_id=asset.id,
+        insight_type=InsightType.cull_metrics,
+        payload={
+            "base_score": base_score,
+            "proxy_path": proxy.proxy_path,
+            "segment_count": len(segments),
+            "segment_signatures": [
+                _segment_signature(asset, seg.start_s, seg.end_s)
+                for seg in segments
+            ],
+        },
+        confidence=0.55,
+        created_at=now_utc(),
+    )
+
+
+def _insights_ocr_row(asset: Asset, ocr_items: list[dict], ocr_model: str, run_ocr: bool) -> AssetInsight:
+    return AssetInsight(
+        id=next_id("insight"),
+        tenant_id=asset.tenant_id,
+        event_id=asset.event_id,
+        asset_id=asset.id,
+        insight_type=InsightType.ocr_text,
+        payload={"items": ocr_items, "model": ocr_model, "skipped": not run_ocr},
+        confidence=0.6 if ocr_items else 0.0,
+        created_at=now_utc(),
+    )
+
+
+def _insights_asr_row(asset: Asset, asr_segments: list[dict]) -> AssetInsight:
+    return AssetInsight(
+        id=next_id("insight"),
+        tenant_id=asset.tenant_id,
+        event_id=asset.event_id,
+        asset_id=asset.id,
+        insight_type=InsightType.asr_transcript,
+        payload={"segments": asr_segments, "model": asr_service.model_name},
+        confidence=0.65 if asr_segments else 0.0,
+        created_at=now_utc(),
+    )
+
+
+def index_event_by_model_stages(
+    asset_ids: list[str],
+    *,
+    semantic_prompt: str | None = None,
+) -> list[AssetInsight]:
+    """
+    One GPU-heavy model at a time: run that stage over all assets, persist insights, unload, then next stage.
+    Order: faces → ASR (video) → VLM → OCR → (segments + cull) → embeddings.
+    """
+    if not asset_ids:
+        return []
+    assets: list[Asset] = []
+    for aid in asset_ids:
+        a = AssetRepository.get(aid)
+        if a is None:
+            raise KeyError(f"Asset not found: {aid}")
+        assets.append(a)
+    event_id = assets[0].event_id
+    for a in assets:
+        if a.event_id != event_id:
+            raise ValueError("All assets must belong to the same event")
+    event = EventRepository.get(event_id)
+    if event is None:
+        raise KeyError(f"Event not found: {event_id}")
+
+    event_ctx, predefined, ocr_langs = _event_context_fields(event)
+
+    states: list[_AssetIndexState] = []
+    for asset in assets:
+        _delete_index_insights(asset)
+        proxy = ensure_asset_proxy(asset)
+        analysis_media_path = proxy.proxy_path if asset.media_type == "video" else asset.media_path
+        states.append(_AssetIndexState(asset=asset, proxy=proxy, analysis_media_path=analysis_media_path))
+
+    def _iter_states():
+        if settings.indexing_show_progress and len(states) > 1:
+            try:
+                from tqdm import tqdm
+
+                return tqdm(states, desc="Indexing assets", unit="file", file=sys.stderr, leave=False)
+            except ImportError:
+                pass
+        return states
+
+    all_insights: list[AssetInsight] = []
+
+    # Phase 1: face model — all assets
+    batch_face: list[AssetInsight] = []
+    for st in _iter_states():
+        st.detections, st.matches = _face_detections_and_matches(st.asset, st.analysis_media_path)
+        batch_face.extend(_insights_face_rows(st.asset, st.detections, st.matches))
+    if batch_face:
+        InsightRepository.create_many(batch_face)
+        all_insights.extend(batch_face)
+    face_service.release()
+
+    # Phase 2: ASR — transcribe videos; images get an empty ASR insight (same shape as before)
+    batch_asr: list[AssetInsight] = []
+    for st in states:
+        if st.asset.media_type != "video":
+            st.asr_segments = []
+        else:
+            st.asr_segments = asr_service.transcribe(st.analysis_media_path)
+        batch_asr.append(_insights_asr_row(st.asset, st.asr_segments))
+    if batch_asr:
+        InsightRepository.create_many(batch_asr)
+        all_insights.extend(batch_asr)
+    asr_service.release()
+
+    # Phase 3: VLM — all assets
+    batch_vlm: list[AssetInsight] = []
+    for st in states:
+        st.vlm = vlm_service.caption_and_tags(
+            media_path=st.analysis_media_path,
+            media_type=st.asset.media_type,
+            scratch_root=settings.scratch_root,
+            event_context=event_ctx,
+            predefined_tags=predefined,
+        )
+        assert st.vlm is not None
+        batch_vlm.extend(_insights_vlm_rows(st.asset, st.vlm))
+    if batch_vlm:
+        InsightRepository.create_many(batch_vlm)
+        all_insights.extend(batch_vlm)
+    vlm_service.release()
+
+    # Phase 4: OCR — all assets
+    batch_ocr: list[AssetInsight] = []
+    for st in states:
+        assert st.vlm is not None
+        st.run_ocr = _should_run_ocr(st.vlm.tags)
+        st.ocr_items, st.ocr_model = ocr_service.extract(
+            st.analysis_media_path,
+            run_ocr=st.run_ocr,
+            ocr_languages=ocr_langs,
+        )
+        batch_ocr.append(_insights_ocr_row(st.asset, st.ocr_items, st.ocr_model, st.run_ocr))
+    if batch_ocr:
+        InsightRepository.create_many(batch_ocr)
+        all_insights.extend(batch_ocr)
+    ocr_service.release()
+
+    # Phase 5–6: segments + cull (CPU), then embedding model once for all assets
+    text_source_limit = 8000
+    for st in states:
+        assert st.vlm is not None
+        asr_text_joined = " ".join([seg.get("text", "") for seg in st.asr_segments]).strip()
+        ocr_text_joined = " ".join([item.get("text", "") for item in st.ocr_items]).strip()
+        duration_s = float(st.proxy.manifest.get("duration_s", 0.0) or 0.0)
+        base_score = _base_cull_score(
+            st.asset,
+            st.proxy.manifest,
+            st.asr_segments,
+            st.ocr_items,
+            caption_confidence=st.vlm.caption_confidence,
+            vlm_tags=st.vlm.tags,
+        )
+        segments = [
+            AssetSegment(
+                id=next_id("seg"),
+                tenant_id=st.asset.tenant_id,
+                event_id=st.asset.event_id,
+                asset_id=st.asset.id,
+                start_s=start_s,
+                end_s=end_s,
+                score=base_score,
+                keep=True,
+                is_duplicate=False,
+                reject_reasons=[],
+                created_at=now_utc(),
+            )
+            for (start_s, end_s) in _segment_for_asset(st.asset, duration_s)
+        ]
+        SegmentRepository.replace_for_asset(st.asset.id, st.asset.event_id, segments)
+        cull_row = _insights_cull_row(st.asset, st.proxy, segments, base_score)
+        InsightRepository.create_many([cull_row])
+        all_insights.append(cull_row)
+
+        people_names = _people_names_from_matches(st.matches)
+        combined = build_embedding_text(
+            caption=st.vlm.caption,
+            tags=st.vlm.tags,
+            people_names=people_names,
+            asr=asr_text_joined,
+            ocr=ocr_text_joined,
+        )
+        embed = embedding_service.embed_text(combined)
+        try:
+            row_id = upsert_asset_vector(
+                tenant_id=st.asset.tenant_id,
+                event_id=st.asset.event_id,
+                asset_id=st.asset.id,
+                kind="multi",
+                vector=embed.vector,
+                text_source=combined[:text_source_limit] if combined else None,
+            )
+            enabled = True
+        except Exception:
+            row_id = 0
+            enabled = False
+        sem_insight = AssetInsight(
+            id=next_id("insight"),
+            tenant_id=st.asset.tenant_id,
+            event_id=st.asset.event_id,
+            asset_id=st.asset.id,
+            insight_type=InsightType.semantic_embedding,
+            payload={
+                "kind": "multi",
+                "vector_ref": {"store": "pgvector", "row_id": row_id},
+                "model": embed.model,
+                "enabled": enabled,
+            },
+            confidence=0.5 if combined else 0.0,
+            created_at=now_utc(),
+        )
+        InsightRepository.create_many([sem_insight])
+        all_insights.append(sem_insight)
+        pipeline = "image" if st.asset.media_type == "image" else "video"
+        insight_count = 8
+        audit_action(
+            st.asset.tenant_id,
+            st.asset.event_id,
+            "asset_indexed",
+            {"asset_id": st.asset.id, "insight_count": insight_count, "pipeline": pipeline},
+        )
+
+    embedding_service.release()
+
+    if semantic_prompt and semantic_prompt.strip() and any(a.media_type == "image" for a in assets):
+        apply_photo_semantic_cull_for_event(
+            tenant_id=assets[0].tenant_id,
+            event_id=event_id,
+            prompt=semantic_prompt.strip(),
+            cull_percent=settings.image_index_semantic_cull_percent,
+        )
+
+    return all_insights
+
+
+def index_image_asset(asset_id: str, *, semantic_prompt: str | None = None) -> list[AssetInsight]:
+    """Image-only indexing: delegates to event-wide staged pipeline (batch of one)."""
     asset = AssetRepository.get(asset_id)
     if asset is None:
         raise KeyError(f"Asset not found: {asset_id}")
-    if asset.media_type == "image":
-        return index_image_asset(asset_id, semantic_prompt=semantic_prompt)
-    return index_video_asset(asset_id)
+    if asset.media_type != "image":
+        raise ValueError(f"Expected image asset, got media_type={asset.media_type!r}")
+    return index_event_by_model_stages([asset_id], semantic_prompt=semantic_prompt)
+
+
+def index_video_asset(asset_id: str) -> list[AssetInsight]:
+    """Video-only indexing: delegates to event-wide staged pipeline (batch of one)."""
+    asset = AssetRepository.get(asset_id)
+    if asset is None:
+        raise KeyError(f"Asset not found: {asset_id}")
+    if asset.media_type != "video":
+        raise ValueError(f"Expected video asset, got media_type={asset.media_type!r}")
+    return index_event_by_model_stages([asset_id], semantic_prompt=None)
+
+
+def index_asset(asset_id: str, *, semantic_prompt: str | None = None) -> list[AssetInsight]:
+    """Index one asset via the staged pipeline (same path as batch: one model at a time, batch of one)."""
+    asset = AssetRepository.get(asset_id)
+    if asset is None:
+        raise KeyError(f"Asset not found: {asset_id}")
+    return index_event_by_model_stages([asset_id], semantic_prompt=semantic_prompt)
 
 
 def reindex_face_insights_for_asset(asset_id: str) -> None:
