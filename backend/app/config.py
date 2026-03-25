@@ -83,6 +83,13 @@ class Settings(BaseModel):
     # Plan sequencing: Qwen2.5 text LLM reorders selected segments for narrative / shot continuity (PoC).
     planner_model_enabled: bool = Field(default_factory=lambda: _parse_bool(os.getenv("PLANNER_MODEL_ENABLED"), True))
     planner_model_id: str = Field(default_factory=lambda: os.getenv("PLANNER_MODEL_ID", "Qwen/Qwen2.5-7B-Instruct"))
+    # When primary planner model OOMs on GPU, try this smaller instruct model (4-bit / fp16 / CPU).
+    planner_fallback_model_id: str = Field(
+        default_factory=lambda: os.getenv("PLANNER_FALLBACK_MODEL_ID", "Qwen/Qwen2.5-3B-Instruct")
+    )
+    planner_prefer_quantized: bool = Field(
+        default_factory=lambda: _parse_bool(os.getenv("PLANNER_PREFER_QUANTIZED"), True)
+    )
     planner_max_segments: int = Field(default_factory=lambda: max(4, int(os.getenv("PLANNER_MAX_SEGMENTS", "80"))))
     planner_temperature: float = Field(default_factory=lambda: float(os.getenv("PLANNER_TEMPERATURE", "0.2")))
     planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "4096")))

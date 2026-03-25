@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from ..config import settings
+from ..gpu_memory import prepare_gpu_for_next_stage
 from ..repositories import AssetRepository, PlanRepository, SegmentRepository
 from ..schemas import Asset, ContentRequestCreate, OutputType, PlannerAction, PlannerPlan
+from .asr import asr_service
+from .embeddings import embedding_service
+from .ocr import ocr_service
 from .search import semantic_search
 from .privacy import audit_action
+from .vlm import vlm_service
 
 
 class PlannerValidationError(ValueError):
@@ -322,6 +327,12 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
             )
         try:
             from .plan_sequencer import PlanSequencerError, sequence_playback_order
+
+            embedding_service.release()
+            vlm_service.release()
+            asr_service.release()
+            ocr_service.release()
+            prepare_gpu_for_next_stage()
 
             ranked_segment_ids, seq_note = sequence_playback_order(candidates, request.prompt)
             order_strategy = "preserve_planner"

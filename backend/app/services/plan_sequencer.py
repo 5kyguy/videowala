@@ -9,10 +9,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ..config import settings
-from ..gpu_memory import reclaim_gpu_memory
+from ..gpu_memory import prepare_gpu_for_next_stage, reclaim_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -126,16 +126,48 @@ def _validate_permutation(
     return out
 
 
+def _bitsandbytes_available() -> bool:
+    try:
+        import bitsandbytes  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    return "out of memory" in str(exc).lower()
+
+
 class PlanSequencerService:
-    """Lazy-load Qwen2.5-7B-Instruct for one-shot segment reordering."""
+    """Lazy-load Qwen2.5 instruct LM for one-shot segment reordering (quantized / CPU fallbacks)."""
 
     def __init__(self) -> None:
         self._model = None
         self._tokenizer = None
+        self._effective_model_id: str | None = None
 
     def release(self) -> None:
+        m, t = self._model, self._tokenizer
         self._model = None
         self._tokenizer = None
+        self._effective_model_id = None
+        del m, t
+        reclaim_gpu_memory()
+
+    def _drop_model(self) -> None:
+        m, t = self._model, self._tokenizer
+        self._model = None
+        self._tokenizer = None
+        self._effective_model_id = None
+        del m, t
         reclaim_gpu_memory()
 
     def _ensure_loaded(self) -> None:
@@ -149,15 +181,90 @@ class PlanSequencerService:
         except Exception as exc:  # noqa: BLE001
             raise PlanSequencerError("transformers/torch are required for planner sequencing.") from exc
 
-        model_id = settings.planner_model_id
-        dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-        self._tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-        self._model = AutoModelForCausalLM.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            device_map="auto",
-            trust_remote_code=True,
-        )
+        prepare_gpu_for_next_stage()
+
+        primary = settings.planner_model_id
+        fallback = settings.planner_fallback_model_id
+        bnb = _bitsandbytes_available()
+        prefer_q = bool(settings.planner_prefer_quantized) and bnb
+
+        attempts: list[tuple[str, str, Callable[[], None]]] = []
+
+        def _add_cuda_strategies(hf_id: str, label: str) -> None:
+            if not torch.cuda.is_available():
+                return
+
+            def load_4bit() -> None:
+                from transformers import BitsAndBytesConfig
+
+                self._tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
+                q = BitsAndBytesConfig(
+                    load_in_4bit=True,
+                    bnb_4bit_compute_dtype=torch.float16,
+                    bnb_4bit_quant_type="nf4",
+                )
+                self._model = AutoModelForCausalLM.from_pretrained(
+                    hf_id,
+                    quantization_config=q,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+
+            def load_fp16() -> None:
+                self._tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
+                self._model = AutoModelForCausalLM.from_pretrained(
+                    hf_id,
+                    torch_dtype=torch.float16,
+                    device_map="auto",
+                    trust_remote_code=True,
+                )
+
+            if prefer_q and bnb:
+                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
+            attempts.append((hf_id, f"cuda fp16 ({label})", load_fp16))
+            if not prefer_q and bnb:
+                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
+
+        _add_cuda_strategies(primary, "primary")
+        if fallback != primary:
+            _add_cuda_strategies(fallback, "fallback")
+
+        def load_cpu() -> None:
+            self._tokenizer = AutoTokenizer.from_pretrained(fallback, trust_remote_code=True)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                fallback,
+                torch_dtype=torch.float32,
+                trust_remote_code=True,
+            )
+            self._model.to("cpu")
+
+        attempts.append((fallback, "cpu fp32 (fallback)", load_cpu))
+
+        last_exc: BaseException | None = None
+        for hf_id, label, loader in attempts:
+            try:
+                reclaim_gpu_memory()
+                loader()
+                self._effective_model_id = hf_id
+                logger.info(
+                    "Planner model ready: %s (%s); free VRAM before /requests/render if indexing ran in-process",
+                    hf_id,
+                    label,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if torch.cuda.is_available() and _is_cuda_oom(exc):
+                    logger.warning("Planner load OOM for %s (%s): %s", hf_id, label, exc)
+                else:
+                    logger.warning("Planner load failed for %s (%s): %s", hf_id, label, exc)
+                self._drop_model()
+                prepare_gpu_for_next_stage()
+                continue
+
+        raise PlanSequencerError(
+            f"Could not load any planner checkpoint (primary={primary!r}, fallback={fallback!r}). Last error: {last_exc!r}"
+        ) from last_exc
 
     def sequence_playback_order(self, candidates: list[dict], user_prompt: str) -> tuple[list[str], str]:
         if not candidates:
@@ -185,8 +292,8 @@ class PlanSequencerService:
                 add_generation_prompt=True,
             )
             inputs = self._tokenizer(prompt_text, return_tensors="pt")
-            if torch.cuda.is_available():
-                inputs = {k: v.cuda() for k, v in inputs.items()}
+            device = next(self._model.parameters()).device
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
             gen_kw: dict[str, Any] = {
                 "max_new_tokens": settings.planner_max_new_tokens,
@@ -201,6 +308,7 @@ class PlanSequencerService:
                 out_ids = self._model.generate(**inputs, **gen_kw)
             gen = out_ids[0][inputs["input_ids"].shape[1] :]
             decoded = self._tokenizer.decode(gen, skip_special_tokens=True)
+            model_id_for_note = self._effective_model_id or settings.planner_model_id
         except Exception as exc:  # noqa: BLE001
             raise PlanSequencerError(f"Planner model generation failed: {exc}") from exc
         finally:
@@ -213,7 +321,8 @@ class PlanSequencerService:
             raise PlanSequencerError('Model JSON must include "segment_ids" array.')
         ordered = [str(x) for x in raw_ids]
         ordered = _validate_permutation(ordered, allowed, candidates)
-        note = f"model={settings.planner_model_id}; {rationale}" if rationale else f"model={settings.planner_model_id}"
+        mid = model_id_for_note
+        note = f"model={mid}; {rationale}" if rationale else f"model={mid}"
         return ordered, note
 
 
