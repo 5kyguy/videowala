@@ -46,6 +46,29 @@ def _patch_qwen2_config_rope_theta_transformers_v5() -> None:
     )
 
 
+def _patch_cache_get_usable_length_compat() -> None:
+    """
+    Alibaba gte-Qwen2 hub `modeling_qwen.py` calls `past_key_values.get_usable_length(seq_length)`.
+    That method was removed from `transformers.cache_utils.Cache` in favor of `get_seq_length` (~4.56+).
+    """
+    try:
+        from transformers.cache_utils import Cache
+    except Exception:
+        return
+    if getattr(Cache, "_videowala_get_usable_length_compat", False):
+        return
+
+    def get_usable_length(self, seq_length: int | None = None, layer_idx: int = 0) -> int:
+        # Legacy call sites pass (seq_length); ignore it — length comes from cached tensors.
+        return self.get_seq_length(layer_idx)
+
+    Cache.get_usable_length = get_usable_length  # type: ignore[assignment]
+    Cache._videowala_get_usable_length_compat = True
+    logger.info(
+        "Applied Cache.get_usable_length compatibility shim for gte-Qwen2 hub modeling (transformers 4.56+)."
+    )
+
+
 def _deterministic_vector(seed: str, dim: int | None = None) -> list[float]:
     d = dim if dim is not None else settings.embedding_vector_dim
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
@@ -147,6 +170,7 @@ class EmbeddingService:
         if self._model is not None:
             return
         _patch_qwen2_config_rope_theta_transformers_v5()
+        _patch_cache_get_usable_length_compat()
         try:
             import torch
             from sentence_transformers import SentenceTransformer
