@@ -172,6 +172,33 @@ def _prompt_token_count(tokenizer: Any, messages: list[dict]) -> tuple[int, str]
     return len(tokenizer.encode(prompt_text)), prompt_text
 
 
+def _tokenizer_encode_with_truncation_left(
+    tokenizer: Any,
+    text: str,
+    *,
+    max_length: int,
+) -> Any:
+    """
+    Left-truncate long prompts while keeping the tail (segment JSON).
+
+    Some older ``tokenizers`` / ``transformers`` builds reject ``truncation_side`` in ``__call__``;
+    setting ``tokenizer.truncation_side`` is the portable path.
+    """
+    prev = getattr(tokenizer, "truncation_side", None)
+    try:
+        if hasattr(tokenizer, "truncation_side"):
+            tokenizer.truncation_side = "left"
+        return tokenizer(
+            text,
+            return_tensors="pt",
+            truncation=True,
+            max_length=max_length,
+        )
+    finally:
+        if prev is not None and hasattr(tokenizer, "truncation_side"):
+            tokenizer.truncation_side = prev
+
+
 def _adjust_planner_limits_for_free_vram(max_in: int, max_new: int) -> tuple[int, int]:
     """Tighten prompt / decode length when little free VRAM remains (KV + attention spike during generate())."""
     try:
@@ -370,12 +397,10 @@ class PlanSequencerService:
         try:
             import torch
 
-            inputs = self._tokenizer(
+            inputs = _tokenizer_encode_with_truncation_left(
+                self._tokenizer,
                 prompt_text,
-                return_tensors="pt",
-                truncation=True,
                 max_length=max_in,
-                truncation_side="left",
             )
             device = next(self._model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
@@ -406,12 +431,10 @@ class PlanSequencerService:
             def _tokenize_current_prompt() -> Any:
                 nonlocal prompt_text
                 _, prompt_text = _prompt_token_count(self._tokenizer, messages)
-                return self._tokenizer(
+                return _tokenizer_encode_with_truncation_left(
+                    self._tokenizer,
                     prompt_text,
-                    return_tensors="pt",
-                    truncation=True,
                     max_length=max_in,
-                    truncation_side="left",
                 )
 
             for gen_try in range(10):
