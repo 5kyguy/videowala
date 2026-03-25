@@ -5,7 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from ..config import settings
-from ..gpu_memory import reclaim_gpu_memory
+from ..gpu_memory import prepare_gpu_for_next_stage, reclaim_gpu_memory
 
 logger = logging.getLogger(__name__)
 
@@ -103,17 +103,42 @@ class EmbeddingResult:
     vector: list[float]
 
 
+def _bitsandbytes_available() -> bool:
+    try:
+        import bitsandbytes  # noqa: F401
+
+        return True
+    except Exception:
+        return False
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    try:
+        import torch
+
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except Exception:
+        pass
+    return "out of memory" in str(exc).lower()
+
+
 class EmbeddingService:
     def __init__(self) -> None:
         self._model = None
         self._model_id = settings.embedding_model_id
+        self._load_strategy: str | None = None
 
     @property
     def model_id(self) -> str:
         return self._model_id
 
     def release(self) -> None:
+        """Unload embedding weights so other stages can use the GPU."""
+        m = self._model
         self._model = None
+        self._load_strategy = None
+        del m
         reclaim_gpu_memory()
 
     def _ensure_model(self) -> None:
@@ -127,14 +152,82 @@ class EmbeddingService:
             from sentence_transformers import SentenceTransformer
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("sentence-transformers is required when stage2_stub_models=False") from exc
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        self._model = SentenceTransformer(
-            self._model_id,
-            trust_remote_code=True,
-            device=device,
-        )
-        # gte-Qwen2 supports long context; cap to avoid pathological RAM use during PoC.
-        self._model.max_seq_length = min(getattr(self._model, "max_seq_length", 8192), 8192)
+        prepare_gpu_for_next_stage()
+
+        model_id = self._model_id
+        last_exc: BaseException | None = None
+
+        def _cap_len() -> None:
+            assert self._model is not None
+            self._model.max_seq_length = min(getattr(self._model, "max_seq_length", 8192), 8192)
+
+        def _load_cuda_4bit() -> None:
+            from transformers import BitsAndBytesConfig
+
+            self._model = SentenceTransformer(
+                model_id,
+                trust_remote_code=True,
+                device="cuda",
+                model_kwargs={
+                    "quantization_config": BitsAndBytesConfig(
+                        load_in_4bit=True,
+                        bnb_4bit_compute_dtype=torch.float16,
+                        bnb_4bit_quant_type="nf4",
+                    ),
+                    "device_map": "auto",
+                },
+            )
+            _cap_len()
+
+        def _load_cuda_default() -> None:
+            self._model = SentenceTransformer(
+                model_id,
+                trust_remote_code=True,
+                device="cuda",
+            )
+            _cap_len()
+
+        def _load_cpu() -> None:
+            self._model = SentenceTransformer(
+                model_id,
+                trust_remote_code=True,
+                device="cpu",
+            )
+            _cap_len()
+
+        attempts: list[tuple[str, Any]] = []
+        if torch.cuda.is_available():
+            if _bitsandbytes_available():
+                attempts.append(("cuda 4-bit NF4", _load_cuda_4bit))
+            attempts.append(("cuda (default)", _load_cuda_default))
+        attempts.append(("cpu", _load_cpu))
+
+        for label, loader in attempts:
+            try:
+                loader()
+                self._load_strategy = label
+                logger.info(
+                    "Embedding model ready: %s (%s); install bitsandbytes for 4-bit GPU to save VRAM",
+                    model_id,
+                    label,
+                )
+                return
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                m = self._model
+                self._model = None
+                del m
+                reclaim_gpu_memory()
+                prepare_gpu_for_next_stage()
+                if torch.cuda.is_available() and _is_cuda_oom(exc):
+                    logger.warning("Embedding load OOM (%s): %s — trying next strategy", label, exc)
+                    continue
+                if label != "cpu":
+                    logger.warning("Embedding load failed (%s): %s — trying next strategy", label, exc)
+                    continue
+                raise RuntimeError(
+                    f"Could not load embedding model {model_id!r}. Last error: {last_exc!r}"
+                ) from last_exc
 
     def embed_text(self, text: str, *, for_query: bool = False) -> EmbeddingResult:
         """

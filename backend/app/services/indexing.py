@@ -448,6 +448,8 @@ def index_event_by_model_stages(
         InsightRepository.create_many(batch_vlm)
         all_insights.extend(batch_vlm)
     vlm_service.release()
+    # VLM can leave most of VRAM allocated until GC; reclaim before OCR/embeddings.
+    prepare_gpu_for_next_stage()
 
     logger.info("Index phase 4/6: OCR over %d asset(s)", n_assets)
     _index_job_progress(index_job_id, 58, f"OCR · 0/{n_assets}")
