@@ -1,10 +1,49 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from dataclasses import dataclass
 
 from ..config import settings
 from ..gpu_memory import reclaim_gpu_memory
+
+logger = logging.getLogger(__name__)
+
+
+def _patch_qwen2_config_rope_theta_transformers_v5() -> None:
+    """
+    Alibaba-NLP/gte-Qwen2-7B-instruct uses trust_remote_code modeling that reads `config.rope_theta`.
+    In transformers v5+, Qwen2Config only exposes RoPE via `rope_parameters`; without this, loading fails with:
+    AttributeError: 'Qwen2Config' object has no attribute 'rope_theta'
+    """
+    try:
+        import transformers
+        from packaging import version
+
+        if version.parse(transformers.__version__) < version.parse("5.0.0"):
+            return
+        from transformers.models.qwen2.configuration_qwen2 import Qwen2Config
+    except Exception:
+        return
+    if getattr(Qwen2Config, "_videowala_rope_theta_compat", False):
+        return
+
+    def _get_rope_theta(self) -> float:
+        rp = getattr(self, "rope_parameters", None)
+        if isinstance(rp, dict) and rp.get("rope_theta") is not None:
+            return float(rp["rope_theta"])
+        return 1_000_000.0
+
+    def _set_rope_theta(self, value: float) -> None:
+        if not isinstance(getattr(self, "rope_parameters", None), dict):
+            self.rope_parameters = {}
+        self.rope_parameters["rope_theta"] = float(value)
+
+    Qwen2Config.rope_theta = property(_get_rope_theta, _set_rope_theta)
+    Qwen2Config._videowala_rope_theta_compat = True
+    logger.info(
+        "Applied Qwen2Config.rope_theta compatibility shim for transformers v5+ (gte-Qwen2 hub code)."
+    )
 
 
 def _deterministic_vector(seed: str, dim: int | None = None) -> list[float]:
@@ -82,6 +121,7 @@ class EmbeddingService:
             return
         if self._model is not None:
             return
+        _patch_qwen2_config_rope_theta_transformers_v5()
         try:
             import torch
             from sentence_transformers import SentenceTransformer
