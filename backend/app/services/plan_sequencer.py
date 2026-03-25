@@ -61,7 +61,7 @@ def _clip(s: str, n: int) -> str:
     return s[: n - 1].rstrip() + "…"
 
 
-def _build_user_prompt(candidates: list[dict], user_prompt: str) -> str:
+def _build_user_prompt(candidates: list[dict], user_prompt: str, *, cue_max: int = 120) -> str:
     lines: list[str] = [
         "You are a video editor. Reorder the clip segments for the best narrative flow and shot continuity.",
         "Prefer grouping all segments from the same source video together (contiguous in timeline order within that video),",
@@ -74,7 +74,17 @@ def _build_user_prompt(candidates: list[dict], user_prompt: str) -> str:
         '- "segment_ids": array of strings — a permutation of every segment_id below, in playback order.',
         '- "rationale": short string explaining the ordering.',
         "",
-        json.dumps(candidates, ensure_ascii=False, indent=2),
+        json.dumps(
+            [
+                {
+                    **{k: v for k, v in c.items() if k != "cue"},
+                    "cue": _clip(str(c.get("cue", "")), cue_max),
+                }
+                for c in candidates
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
     ]
     return "\n".join(lines)
 
@@ -146,6 +156,22 @@ def _is_cuda_oom(exc: BaseException) -> bool:
     return "out of memory" in str(exc).lower()
 
 
+def _planner_attn_kwargs() -> dict[str, Any]:
+    impl = (settings.planner_attn_implementation or "").strip().lower()
+    if not impl or impl in ("eager", "none"):
+        return {}
+    return {"attn_implementation": impl}
+
+
+def _prompt_token_count(tokenizer: Any, messages: list[dict]) -> tuple[int, str]:
+    prompt_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    return len(tokenizer.encode(prompt_text)), prompt_text
+
+
 class PlanSequencerService:
     """Lazy-load Qwen2.5 instruct LM for one-shot segment reordering (quantized / CPU fallbacks)."""
 
@@ -187,6 +213,7 @@ class PlanSequencerService:
         fallback = settings.planner_fallback_model_id
         bnb = _bitsandbytes_available()
         prefer_q = bool(settings.planner_prefer_quantized) and bnb
+        attn_kw = _planner_attn_kwargs()
 
         attempts: list[tuple[str, str, Callable[[], None]]] = []
 
@@ -208,6 +235,7 @@ class PlanSequencerService:
                     quantization_config=q,
                     device_map="auto",
                     trust_remote_code=True,
+                    **attn_kw,
                 )
 
             def load_fp16() -> None:
@@ -217,6 +245,7 @@ class PlanSequencerService:
                     torch_dtype=torch.float16,
                     device_map="auto",
                     trust_remote_code=True,
+                    **attn_kw,
                 )
 
             if prefer_q and bnb:
@@ -235,6 +264,7 @@ class PlanSequencerService:
                 fallback,
                 torch_dtype=torch.float32,
                 trust_remote_code=True,
+                **attn_kw,
             )
             self._model.to("cpu")
 
@@ -275,23 +305,42 @@ class PlanSequencerService:
         self._ensure_loaded()
 
         allowed = {str(c["segment_id"]) for c in candidates if c.get("segment_id")}
-        user = _build_user_prompt(candidates, user_prompt)
-        messages = [
-            {
-                "role": "system",
-                "content": "You reply with a single JSON object only. No markdown fences unless necessary.",
-            },
-            {"role": "user", "content": user},
-        ]
+        max_in = settings.planner_max_input_tokens
+        max_rows = len(candidates)
+        cue_max = 200
+        messages: list[dict] = []
+        prompt_text: str | None = None
+        for _ in range(16):
+            user = _build_user_prompt(candidates[:max_rows], user_prompt, cue_max=cue_max)
+            messages = [
+                {
+                    "role": "system",
+                    "content": "You reply with a single JSON object only. No markdown fences unless necessary.",
+                },
+                {"role": "user", "content": user},
+            ]
+            ntokens, prompt_text = _prompt_token_count(self._tokenizer, messages)
+            if ntokens <= max_in:
+                break
+            if cue_max > 48:
+                cue_max = max(48, cue_max - 32)
+            elif max_rows > 8:
+                max_rows = max(8, max_rows - 8)
+            else:
+                break
+        if prompt_text is None or not messages:
+            raise PlanSequencerError("Planner prompt could not be built.")
+
         try:
             import torch
 
-            prompt_text = self._tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
+            inputs = self._tokenizer(
+                prompt_text,
+                return_tensors="pt",
+                truncation=True,
+                max_length=max_in,
+                truncation_side="left",
             )
-            inputs = self._tokenizer(prompt_text, return_tensors="pt")
             device = next(self._model.parameters()).device
             inputs = {k: v.to(device) for k, v in inputs.items()}
             pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
@@ -304,11 +353,73 @@ class PlanSequencerService:
                 gen_kw["temperature"] = settings.planner_temperature
             else:
                 gen_kw["do_sample"] = False
-            with torch.no_grad():
-                out_ids = self._model.generate(**inputs, **gen_kw)
-            gen = out_ids[0][inputs["input_ids"].shape[1] :]
-            decoded = self._tokenizer.decode(gen, skip_special_tokens=True)
+
+            max_new = int(settings.planner_max_new_tokens)
+            decoded: str | None = None
+            last_gen_exc: BaseException | None = None
+            prompt_rebuilt_once = False
+
+            def _tokenize_current_prompt() -> Any:
+                nonlocal prompt_text
+                _, prompt_text = _prompt_token_count(self._tokenizer, messages)
+                return self._tokenizer(
+                    prompt_text,
+                    return_tensors="pt",
+                    truncation=True,
+                    max_length=max_in,
+                    truncation_side="left",
+                )
+
+            for gen_try in range(10):
+                try:
+                    reclaim_gpu_memory()
+                    gen_kw["max_new_tokens"] = max_new
+                    with torch.no_grad():
+                        out_ids = self._model.generate(**inputs, **gen_kw)
+                    gen = out_ids[0][inputs["input_ids"].shape[1] :]
+                    decoded = self._tokenizer.decode(gen, skip_special_tokens=True)
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_gen_exc = exc
+                    if not _is_cuda_oom(exc):
+                        raise PlanSequencerError(f"Planner model generation failed: {exc}") from exc
+                    logger.warning(
+                        "Planner generate CUDA OOM (attempt %s/10); max_new_tokens=%s",
+                        gen_try + 1,
+                        max_new,
+                    )
+                    if max_new > 64:
+                        max_new = max(64, max_new // 2)
+                        continue
+                    if not prompt_rebuilt_once and max_rows > 12:
+                        prompt_rebuilt_once = True
+                        max_rows = max(12, max_rows // 2)
+                        cue_max = max(48, cue_max - 40)
+                        user = _build_user_prompt(candidates[:max_rows], user_prompt, cue_max=cue_max)
+                        messages = [
+                            {
+                                "role": "system",
+                                "content": "You reply with a single JSON object only. No markdown fences unless necessary.",
+                            },
+                            {"role": "user", "content": user},
+                        ]
+                        inputs = _tokenize_current_prompt()
+                        inputs = {k: v.to(device) for k, v in inputs.items()}
+                        max_new = min(256, max(96, int(settings.planner_max_new_tokens) // 2))
+                        reclaim_gpu_memory()
+                        continue
+                    raise PlanSequencerError(
+                        f"Planner model generation failed (CUDA OOM after retries): {last_gen_exc!r}"
+                    ) from last_gen_exc
+
+            if decoded is None:
+                raise PlanSequencerError(
+                    f"Planner model generation failed after {last_gen_exc!r}"
+                ) from last_gen_exc
+
             model_id_for_note = self._effective_model_id or settings.planner_model_id
+        except PlanSequencerError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise PlanSequencerError(f"Planner model generation failed: {exc}") from exc
         finally:

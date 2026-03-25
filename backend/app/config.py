@@ -92,7 +92,14 @@ class Settings(BaseModel):
     )
     planner_max_segments: int = Field(default_factory=lambda: max(4, int(os.getenv("PLANNER_MAX_SEGMENTS", "80"))))
     planner_temperature: float = Field(default_factory=lambda: float(os.getenv("PLANNER_TEMPERATURE", "0.2")))
-    planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "4096")))
+    # Sequencing only emits a short JSON object; large values mainly bloat KV cache during generate().
+    planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "384")))
+    # Hard cap on prompt length (tokens) before left-truncation fallback — avoids multi‑GiB KV on 14 GiB GPUs.
+    planner_max_input_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_INPUT_TOKENS", "4096")))
+    # Prefer PyTorch SDPA attention (lower VRAM than eager on many setups). Set to "eager" to disable.
+    planner_attn_implementation: str = Field(
+        default_factory=lambda: os.getenv("PLANNER_ATTN_IMPLEMENTATION", "sdpa").strip() or "sdpa"
+    )
 
 
 settings = Settings()
