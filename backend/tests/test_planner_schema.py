@@ -382,3 +382,59 @@ def test_build_plan_planner_disabled_uses_legacy_order_strategy() -> None:
     finally:
         settings.stage2_stub_models = saved_stub
         settings.planner_model_enabled = saved_planner
+
+
+def test_build_plan_applies_duration_aware_segment_cap() -> None:
+    saved_duration_cap = settings.planner_duration_aware_cap
+    saved_min_clip = settings.planner_min_clip_seconds
+    saved_max_seg = settings.planner_max_segments
+    settings.planner_duration_aware_cap = True
+    settings.planner_min_clip_seconds = 3
+    settings.planner_max_segments = 80
+    try:
+        _ensure_event()
+        now = now_utc()
+        AssetRepository.create(
+            Asset(
+                id="asset_many",
+                tenant_id="tenant_a",
+                event_id="event_a",
+                media_path="media/many.mp4",
+                media_type="video",
+                created_at=now,
+            )
+        )
+        rows: list[AssetSegment] = []
+        for i in range(30):
+            rows.append(
+                AssetSegment(
+                    id=f"seg_{i}",
+                    tenant_id="tenant_a",
+                    event_id="event_a",
+                    asset_id="asset_many",
+                    start_s=float(i * 6),
+                    end_s=float(i * 6 + 6),
+                    score=0.95,
+                    keep=True,
+                    is_duplicate=False,
+                    reject_reasons=[],
+                    created_at=now,
+                )
+            )
+        SegmentRepository.replace_for_asset("asset_many", "event_a", rows)
+        request = ContentRequestCreate(
+            tenant_id="tenant_a",
+            event_id="event_a",
+            output_type=OutputType.highlight_reel,
+            prompt="Build a smooth one minute highlight.",
+            target_duration_seconds=60,
+        )
+        context = {"vlm_caption": [{"asset_id": "asset_many", "text": "dance"}], "vlm_tags": [], "face_matches": []}
+        plan = build_plan(request, context)
+        select_action = next(a for a in plan.actions if a.action == "select_segments")
+        segment_ids = select_action.params.get("segment_ids", [])
+        assert len(segment_ids) <= 20
+    finally:
+        settings.planner_duration_aware_cap = saved_duration_cap
+        settings.planner_min_clip_seconds = saved_min_clip
+        settings.planner_max_segments = saved_max_seg

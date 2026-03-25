@@ -54,6 +54,48 @@ def continuity_heuristic_order(rows: list[dict]) -> tuple[list[str], str]:
     return out, "continuity_heuristic: group_by_asset_first_seen_order"
 
 
+def _prompt_requests_interleaving(user_prompt: str) -> bool:
+    p = (user_prompt or "").strip().lower()
+    if not p:
+        return False
+    cues = (
+        "interleave",
+        "intercut",
+        "crosscut",
+        "cross-cut",
+        "montage",
+        "rapid cut",
+        "quick cut",
+        "fast cut",
+        "smash cut",
+    )
+    return any(c in p for c in cues)
+
+
+def _enforce_asset_contiguity(ordered_ids: list[str], candidates: list[dict]) -> list[str]:
+    if not ordered_ids:
+        return []
+    by_id = {str(c.get("segment_id", "")): c for c in candidates if c.get("segment_id")}
+    first_seen: dict[str, int] = {}
+    by_asset: dict[str, list[dict]] = {}
+    for idx, sid in enumerate(ordered_ids):
+        row = by_id.get(str(sid))
+        if row is None:
+            continue
+        aid = str(row.get("asset_id", ""))
+        if aid not in first_seen:
+            first_seen[aid] = idx
+        by_asset.setdefault(aid, []).append(row)
+    out: list[str] = []
+    for aid in sorted(by_asset.keys(), key=lambda x: first_seen.get(x, 10**9)):
+        rows = sorted(by_asset[aid], key=lambda x: float(x.get("start_s", 0.0)))
+        for row in rows:
+            sid = str(row.get("segment_id", ""))
+            if sid:
+                out.append(sid)
+    return out
+
+
 def _clip(s: str, n: int) -> str:
     s = s.strip()
     if len(s) <= n:
@@ -64,8 +106,8 @@ def _clip(s: str, n: int) -> str:
 def _build_user_prompt(candidates: list[dict], user_prompt: str, *, cue_max: int = 120) -> str:
     lines: list[str] = [
         "You are a video editor. Reorder the clip segments for the best narrative flow and shot continuity.",
-        "Prefer grouping all segments from the same source video together (contiguous in timeline order within that video),",
-        "unless the user prompt clearly requires interleaving for effect.",
+        "Group all segments from the same source video together in timeline order within that video.",
+        "Do NOT interleave sources unless the user explicitly asks for intercut or rapid montage style.",
         "",
         f"User prompt / brief: {_clip(user_prompt, 1200)}",
         "",
@@ -601,6 +643,11 @@ class PlanSequencerService:
             raise PlanSequencerError('Model JSON must include "segment_ids" array.')
         ordered = [str(x) for x in raw_ids]
         ordered = _validate_permutation(ordered, allowed, candidates)
+        if not _prompt_requests_interleaving(user_prompt):
+            contiguous = _enforce_asset_contiguity(ordered, candidates)
+            if contiguous and contiguous != ordered:
+                ordered = contiguous
+                rationale = f"{rationale}; continuity_enforced".strip("; ")
         mid = model_id_for_note
         note = f"model={mid}; {rationale}" if rationale else f"model={mid}"
         return ordered, note

@@ -9,6 +9,9 @@ from app.db import now_utc, reset_database_for_tests
 from app.repositories import AssetRepository, EventRepository, next_id
 from app.schemas import Asset, Event, OutputType, PlannerAction, PlannerPlan
 from app.services.rendering import (
+    _allocate_clip_seconds,
+    _normalize_and_merge_clip_inputs,
+    _prune_clips_to_budget,
     UnsafeRenderCommandError,
     build_ffmpeg_preview_command,
     create_render_job,
@@ -128,3 +131,38 @@ def test_render_job_execution_completes() -> None:
     output = Path(done.output_path)
     assert output.exists()
     assert output.stat().st_size > 1024
+
+
+def test_duration_budget_prunes_low_score_clips() -> None:
+    clips = [
+        {"asset_id": "a", "path": "media/a.mp4", "start_s": 0.0, "end_s": 6.0, "score": 0.95},
+        {"asset_id": "b", "path": "media/b.mp4", "start_s": 0.0, "end_s": 6.0, "score": 0.2},
+        {"asset_id": "c", "path": "media/c.mp4", "start_s": 0.0, "end_s": 6.0, "score": 0.8},
+    ]
+    pruned = _prune_clips_to_budget(clips, total_seconds=6, min_clip_seconds=3)
+    assert len(pruned) == 2
+    assert [c["asset_id"] for c in pruned] == ["a", "c"]
+
+
+def test_allocate_clip_seconds_exact_target_sum() -> None:
+    clips = [
+        {"asset_id": "a", "start_s": 0.0, "end_s": 8.0, "score": 0.9},
+        {"asset_id": "b", "start_s": 0.0, "end_s": 8.0, "score": 0.5},
+        {"asset_id": "c", "start_s": 0.0, "end_s": 8.0, "score": 0.4},
+    ]
+    out = _allocate_clip_seconds(12, clips, min_clip_seconds=3)
+    assert sum(out) == 12
+    assert all(1 <= x <= 8 for x in out)
+
+
+def test_merge_contiguous_same_asset_ranges() -> None:
+    clips = [
+        {"asset_id": "a", "path": "media/a.mp4", "start_s": 0.0, "end_s": 3.0, "score": 0.6},
+        {"asset_id": "a", "path": "media/a.mp4", "start_s": 3.0, "end_s": 6.0, "score": 0.7},
+        {"asset_id": "b", "path": "media/b.mp4", "start_s": 1.0, "end_s": 4.0, "score": 0.5},
+    ]
+    merged = _normalize_and_merge_clip_inputs(clips, merge_gap_s=0.25)
+    assert len(merged) == 2
+    assert merged[0]["asset_id"] == "a"
+    assert merged[0]["start_s"] == 0.0
+    assert merged[0]["end_s"] == 6.0

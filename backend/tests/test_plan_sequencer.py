@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from app.services.plan_sequencer import _extract_json_object, continuity_heuristic_order
+from app.services.plan_sequencer import (
+    _enforce_asset_contiguity,
+    _extract_json_object,
+    _prompt_requests_interleaving,
+    continuity_heuristic_order,
+)
 
 
 def test_continuity_heuristic_groups_interleaved_assets() -> None:
@@ -41,3 +46,19 @@ def test_extract_json_object_truncated_mid_array() -> None:
     "seg_0ce185bc5133"""
     out = _extract_json_object(text)
     assert out["segment_ids"] == ["seg_a", "seg_b", "seg_0ce185bc5133"]
+
+
+def test_prompt_requests_interleaving_detects_montage_terms() -> None:
+    assert _prompt_requests_interleaving("Make a rapid-cut montage with intercut visuals")
+    assert not _prompt_requests_interleaving("Keep the story smooth and chronological")
+
+
+def test_enforce_asset_contiguity_groups_by_first_seen_asset() -> None:
+    candidates = [
+        {"segment_id": "a1", "asset_id": "asset_a", "start_s": 0.0},
+        {"segment_id": "b1", "asset_id": "asset_b", "start_s": 0.0},
+        {"segment_id": "a2", "asset_id": "asset_a", "start_s": 5.0},
+        {"segment_id": "b2", "asset_id": "asset_b", "start_s": 5.0},
+    ]
+    ordered = _enforce_asset_contiguity(["a1", "b1", "a2", "b2"], candidates)
+    assert ordered == ["a1", "a2", "b1", "b2"]

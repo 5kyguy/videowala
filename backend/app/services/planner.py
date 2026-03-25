@@ -79,17 +79,22 @@ def _semantic_asset_scores(request: ContentRequestCreate) -> dict[str, float]:
     return out
 
 
-def _diversify_by_asset(rows: list[dict], max_per_asset: int = 4) -> list[dict]:
+def _diversify_by_asset(rows: list[dict], max_per_asset: int = 4, min_total: int = 0) -> list[dict]:
     """Keep score ordering but cap how many segments we take per asset (highlight reel)."""
     sorted_rows = sorted(rows, key=lambda x: -float(x.get("score", 0.0)))
     counts: dict[str, int] = {}
     out: list[dict] = []
+    remainder: list[dict] = []
     for r in sorted_rows:
         aid = r["asset_id"]
         if counts.get(aid, 0) >= max_per_asset:
+            remainder.append(r)
             continue
         out.append(r)
         counts[aid] = counts.get(aid, 0) + 1
+    if min_total > len(out):
+        need = min_total - len(out)
+        out.extend(remainder[:need])
     return out
 
 
@@ -117,7 +122,9 @@ def _order_kept_segments(
 
         return sorted(kept, key=pkey)
     if output_type == OutputType.highlight_reel:
-        return _diversify_by_asset(kept, max_per_asset=4)
+        min_hold = max(1, int(settings.planner_min_clip_seconds))
+        min_total = max(4, int(request.target_duration_seconds) // min_hold)
+        return _diversify_by_asset(kept, max_per_asset=4, min_total=min_total)
     return sorted(kept, key=lambda x: -float(x.get("score", 0.0)))
 
 
@@ -309,6 +316,10 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
     dedup_ids_set = set(dedup_ids)
     filtered_segments = [row for row in ranked_segments if row["asset_id"] in dedup_ids_set]
     max_seg = settings.planner_max_segments
+    if settings.planner_duration_aware_cap:
+        min_hold = max(1, int(settings.planner_min_clip_seconds))
+        duration_cap = max(4, int(request.target_duration_seconds) // min_hold)
+        max_seg = max(4, min(max_seg, duration_cap))
     ranked_segment_ids = [row["segment_id"] for row in filtered_segments[:max_seg]]
 
     order_strategy = _set_order_strategy(request.output_type)
@@ -352,7 +363,8 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
 
     rationale = (
         f"Plan: output_type={request.output_type.value}, order={order_strategy}, "
-        "segment scoring blends lexical overlap + semantic retrieval + cull score."
+        "segment scoring blends lexical overlap + semantic retrieval + cull score. "
+        f"segment_cap={max_seg}."
         f"{rationale_extra}"
     )
 

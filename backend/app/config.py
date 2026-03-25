@@ -100,6 +100,12 @@ class Settings(BaseModel):
         default_factory=lambda: _parse_bool(os.getenv("PLANNER_SOFT_FAIL_TO_HEURISTIC"), True)
     )
     planner_max_segments: int = Field(default_factory=lambda: max(4, int(os.getenv("PLANNER_MAX_SEGMENTS", "80"))))
+    planner_duration_aware_cap: bool = Field(
+        default_factory=lambda: _parse_bool(os.getenv("PLANNER_DURATION_AWARE_CAP"), True)
+    )
+    planner_min_clip_seconds: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("PLANNER_MIN_CLIP_SECONDS", "3")))
+    )
     planner_temperature: float = Field(default_factory=lambda: float(os.getenv("PLANNER_TEMPERATURE", "0.2")))
     # Floor for decode length; actual budget scales up with segment count in ``plan_sequencer``.
     planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "384")))
@@ -108,6 +114,12 @@ class Settings(BaseModel):
     # Prefer PyTorch SDPA attention (lower VRAM than eager on many setups). Set to "eager" to disable.
     planner_attn_implementation: str = Field(
         default_factory=lambda: os.getenv("PLANNER_ATTN_IMPLEMENTATION", "sdpa").strip() or "sdpa"
+    )
+    render_min_clip_seconds: int = Field(
+        default_factory=lambda: max(1, int(os.getenv("RENDER_MIN_CLIP_SECONDS", "3")))
+    )
+    render_merge_gap_seconds: float = Field(
+        default_factory=lambda: max(0.0, float(os.getenv("RENDER_MERGE_GAP_SECONDS", "0.25")))
     )
 
 

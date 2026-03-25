@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import shutil
 import subprocess
 from pathlib import Path
@@ -77,27 +78,149 @@ def _seconds_per_asset(total_seconds: int, count: int) -> int:
     return max(1, total_seconds // count)
 
 
-def _allocate_clip_seconds(total_seconds: int, clip_inputs: list[dict]) -> list[int]:
-    if not clip_inputs:
+def _normalize_and_merge_clip_inputs(clip_inputs: list[dict], merge_gap_s: float) -> list[dict]:
+    normalized: list[dict] = []
+    for item in clip_inputs:
+        try:
+            start_s = float(item.get("start_s", 0.0) or 0.0)
+            end_s = float(item.get("end_s", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            logger.warning("Skipping clip with invalid timing payload: %s", item)
+            continue
+        start_s = max(0.0, start_s)
+        if end_s <= start_s:
+            logger.warning("Skipping clip with non-positive window: start=%s end=%s", start_s, end_s)
+            continue
+        row = dict(item)
+        row["start_s"] = start_s
+        row["end_s"] = end_s
+        row["score"] = float(item.get("score", 0.5) or 0.5)
+        normalized.append(row)
+
+    if not normalized:
         return []
-    scores = [max(0.05, float(item.get("score", 0.5))) for item in clip_inputs]
-    total = sum(scores)
-    raw = [(score / total) * total_seconds for score in scores]
-    out = [max(1, int(x)) for x in raw]
-    delta = total_seconds - sum(out)
-    idx = 0
-    while delta != 0 and out:
-        pos = idx % len(out)
-        if delta > 0:
-            out[pos] += 1
-            delta -= 1
-        else:
-            if out[pos] > 1:
-                out[pos] -= 1
-                delta += 1
-        idx += 1
-        if idx > 10000:
+
+    merged: list[dict] = [normalized[0]]
+    for cur in normalized[1:]:
+        prev = merged[-1]
+        same_asset = str(prev.get("asset_id", "")) == str(cur.get("asset_id", ""))
+        same_path = str(prev.get("path", "")) == str(cur.get("path", ""))
+        contiguous = float(cur["start_s"]) <= float(prev["end_s"]) + max(0.0, merge_gap_s)
+        if same_asset and same_path and contiguous:
+            prev["end_s"] = max(float(prev["end_s"]), float(cur["end_s"]))
+            prev["score"] = max(float(prev.get("score", 0.5)), float(cur.get("score", 0.5)))
+            continue
+        merged.append(cur)
+    return merged
+
+
+def _prune_clips_to_budget(clip_inputs: list[dict], total_seconds: int, min_clip_seconds: int) -> list[dict]:
+    out = list(clip_inputs)
+    if total_seconds <= 0:
+        return []
+    target_min = max(1, int(min_clip_seconds))
+    while len(out) > 1 and len(out) * target_min > total_seconds:
+        drop_idx = min(
+            range(len(out)),
+            key=lambda i: (
+                float(out[i].get("score", 0.5) or 0.5),
+                float(out[i].get("end_s", 0.0) or 0.0) - float(out[i].get("start_s", 0.0) or 0.0),
+            ),
+        )
+        dropped = out.pop(drop_idx)
+        logger.info(
+            "Dropping clip for duration budget: asset=%s start=%.3f end=%.3f score=%.3f",
+            dropped.get("asset_id"),
+            float(dropped.get("start_s", 0.0) or 0.0),
+            float(dropped.get("end_s", 0.0) or 0.0),
+            float(dropped.get("score", 0.0) or 0.0),
+        )
+    return out
+
+
+def _allocate_clip_seconds(total_seconds: int, clip_inputs: list[dict], min_clip_seconds: int) -> list[int]:
+    if not clip_inputs or total_seconds <= 0:
+        return []
+    if len(clip_inputs) > total_seconds:
+        raise UnsafeRenderCommandError(
+            f"Too many clips selected for duration budget ({len(clip_inputs)} clips for {total_seconds}s)."
+        )
+
+    mins: list[int] = []
+    maxes: list[int] = []
+    scores: list[float] = []
+    for item in clip_inputs:
+        window = max(0.0, float(item.get("end_s", 0.0) or 0.0) - float(item.get("start_s", 0.0) or 0.0))
+        max_s = max(1, int(math.floor(window + 1e-6)))
+        min_s = min(max_s, max(1, int(min_clip_seconds)))
+        mins.append(min_s)
+        maxes.append(max_s)
+        scores.append(max(0.05, float(item.get("score", 0.5) or 0.5)))
+
+    if sum(maxes) < total_seconds:
+        raise UnsafeRenderCommandError(
+            f"Selected clips cannot satisfy target duration {total_seconds}s (capacity={sum(maxes)}s)."
+        )
+
+    out = list(mins)
+    floor = 1
+    while sum(out) > total_seconds:
+        reduced = False
+        for idx in sorted(range(len(out)), key=lambda i: scores[i]):
+            if out[idx] > floor:
+                out[idx] -= 1
+                reduced = True
+                if sum(out) == total_seconds:
+                    break
+        if not reduced:
             break
+    if sum(out) > total_seconds:
+        raise UnsafeRenderCommandError(
+            f"Could not fit selected clips into target duration {total_seconds}s after allocation."
+        )
+
+    remaining = total_seconds - sum(out)
+    while remaining > 0:
+        headroom = [maxes[i] - out[i] for i in range(len(out))]
+        if sum(headroom) <= 0:
+            raise UnsafeRenderCommandError(
+                f"Selected clips exhausted before meeting target duration {total_seconds}s."
+            )
+        weighted = [scores[i] * headroom[i] for i in range(len(out))]
+        weight_sum = sum(weighted)
+        if weight_sum <= 0:
+            for i in range(len(out)):
+                if remaining <= 0:
+                    break
+                if headroom[i] > 0:
+                    out[i] += 1
+                    remaining -= 1
+            continue
+        ideal = [remaining * (w / weight_sum) for w in weighted]
+        add = [min(headroom[i], int(math.floor(ideal[i]))) for i in range(len(out))]
+        used = sum(add)
+        for i in range(len(out)):
+            if add[i] > 0:
+                out[i] += add[i]
+        remaining -= used
+        if remaining <= 0:
+            break
+        remainders = sorted(
+            (
+                (ideal[i] - math.floor(ideal[i]), i)
+                for i in range(len(out))
+                if (maxes[i] - out[i]) > 0
+            ),
+            reverse=True,
+        )
+        if not remainders:
+            continue
+        for _r, i in remainders:
+            if remaining <= 0:
+                break
+            if out[i] < maxes[i]:
+                out[i] += 1
+                remaining -= 1
     return out
 
 
@@ -277,7 +400,7 @@ def _prepare_video_clip_range(
     input_file: str,
     output_clip: Path,
     start_s: float,
-    seconds: int,
+    seconds: float,
     *,
     vf: str,
 ) -> list[str]:
@@ -289,7 +412,7 @@ def _prepare_video_clip_range(
         "-i",
         input_file,
         "-t",
-        str(seconds),
+        str(max(0.05, seconds)),
         "-vf",
         vf,
         *_encode_video_audio_args(),
@@ -313,7 +436,7 @@ def _pad_to_canvas(input_path: Path, output_path: Path, target_w: int, target_h:
     ]
 
 
-def _concat_demuxer(prepared_clips: list[Path], output_file: str) -> None:
+def _concat_demuxer(prepared_clips: list[Path], output_file: str, duration_seconds: int) -> None:
     scratch_dir = prepared_clips[0].parent
     concat_list = scratch_dir / "concat.txt"
     concat_list.write_text(
@@ -329,6 +452,8 @@ def _concat_demuxer(prepared_clips: list[Path], output_file: str) -> None:
         "0",
         "-i",
         str(concat_list),
+        "-t",
+        str(max(1, int(duration_seconds))),
         *_encode_video_audio_args(),
         "-movflags",
         "+faststart",
@@ -392,7 +517,11 @@ def _render_from_inputs(
                 asset_by_id[str(aid)] = a
 
     ordered_inputs = _order_clip_inputs(clip_inputs, strategy, asset_by_id)
-    allocated_seconds = _allocate_clip_seconds(duration_seconds, ordered_inputs)
+    merge_gap_s = float(getattr(settings, "render_merge_gap_seconds", 0.25))
+    min_clip_seconds = max(1, int(getattr(settings, "render_min_clip_seconds", 2)))
+    ordered_inputs = _normalize_and_merge_clip_inputs(ordered_inputs, merge_gap_s=merge_gap_s)
+    ordered_inputs = _prune_clips_to_budget(ordered_inputs, duration_seconds, min_clip_seconds)
+    allocated_seconds = _allocate_clip_seconds(duration_seconds, ordered_inputs, min_clip_seconds=min_clip_seconds)
     ref_fps = _reference_video_fps(ordered_inputs)
 
     prepared_raw: list[Path] = []
@@ -404,11 +533,20 @@ def _render_from_inputs(
             continue
         clip_path = scratch_dir / f"clip_{index:04d}_raw.mp4"
         seconds_each = (
-            allocated_seconds[index]
+            float(allocated_seconds[index])
             if index < len(allocated_seconds)
             else _seconds_per_asset(duration_seconds, len(ordered_inputs))
         )
         start_s = float(item.get("start_s", 0.0) or 0.0)
+        end_s = float(item.get("end_s", 0.0) or 0.0)
+        available_window = max(0.0, end_s - start_s)
+        if available_window <= 0:
+            logger.warning("Skipping clip with invalid extraction bounds: start=%s end=%s", start_s, end_s)
+            continue
+        seconds_each = min(seconds_each, available_window)
+        if seconds_each <= 0:
+            logger.warning("Skipping clip with zero allocated duration: start=%s end=%s", start_s, end_s)
+            continue
         transpose = int(item.get("display_transpose", 0) or 0)
         vf = _build_transpose_and_crop_vf(transpose, orientation)
         if source.suffix.lower() in IMAGE_EXTS:
@@ -453,7 +591,7 @@ def _render_from_inputs(
             prepared_final.append(outp)
 
     logger.info("Render %s: concatenating %d clip(s) (orientation=%s)", job_id or "?", len(prepared_final), orientation)
-    _concat_demuxer(prepared_final, output_file)
+    _concat_demuxer(prepared_final, output_file, duration_seconds=duration_seconds)
 
 
 def create_render_job(
