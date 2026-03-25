@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from ..config import settings
 from ..gpu_memory import prepare_gpu_for_next_stage
 from ..repositories import AssetRepository, PlanRepository, SegmentRepository
@@ -10,6 +12,8 @@ from .ocr import ocr_service
 from .search import semantic_search
 from .privacy import audit_action
 from .vlm import vlm_service
+
+logger = logging.getLogger(__name__)
 
 
 class PlannerValidationError(ValueError):
@@ -326,7 +330,7 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
                 }
             )
         try:
-            from .plan_sequencer import PlanSequencerError, sequence_playback_order
+            from .plan_sequencer import PlanSequencerError, continuity_heuristic_order, sequence_playback_order
 
             embedding_service.release()
             vlm_service.release()
@@ -338,7 +342,13 @@ def build_plan(request: ContentRequestCreate, event_context: dict) -> PlannerPla
             order_strategy = "preserve_planner"
             rationale_extra = f" Sequencing: {seq_note}"
         except PlanSequencerError as exc:
-            raise PlannerValidationError(str(exc)) from exc
+            if settings.planner_soft_fail_to_heuristic:
+                logger.warning("Planner LLM sequencing failed; using continuity heuristic: %s", exc)
+                ranked_segment_ids, seq_note = continuity_heuristic_order(candidates)
+                order_strategy = "continuity_heuristic_fallback"
+                rationale_extra = f" Sequencing: {seq_note} (llm_error: {exc})"
+            else:
+                raise PlannerValidationError(str(exc)) from exc
 
     rationale = (
         f"Plan: output_type={request.output_type.value}, order={order_strategy}, "

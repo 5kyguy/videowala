@@ -172,6 +172,26 @@ def _prompt_token_count(tokenizer: Any, messages: list[dict]) -> tuple[int, str]
     return len(tokenizer.encode(prompt_text)), prompt_text
 
 
+def _adjust_planner_limits_for_free_vram(max_in: int, max_new: int) -> tuple[int, int]:
+    """Tighten prompt / decode length when little free VRAM remains (KV + attention spike during generate())."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return max_in, max_new
+        free_b, _total_b = torch.cuda.mem_get_info()
+        free_gb = free_b / (1024**3)
+        if free_gb < 2.5:
+            return min(max_in, 1024), min(max_new, 96)
+        if free_gb < 4.0:
+            return min(max_in, 1536), min(max_new, 128)
+        if free_gb < 6.5:
+            return min(max_in, 2560), min(max_new, 192)
+        return max_in, max_new
+    except Exception:
+        return max_in, max_new
+
+
 class PlanSequencerService:
     """Lazy-load Qwen2.5 instruct LM for one-shot segment reordering (quantized / CPU fallbacks)."""
 
@@ -215,11 +235,10 @@ class PlanSequencerService:
         prefer_q = bool(settings.planner_prefer_quantized) and bnb
         attn_kw = _planner_attn_kwargs()
 
-        attempts: list[tuple[str, str, Callable[[], None]]] = []
-
-        def _add_cuda_strategies(hf_id: str, label: str) -> None:
+        def _cuda_strategies_for(hf_id: str, label: str) -> list[tuple[str, str, Callable[[], None]]]:
+            out: list[tuple[str, str, Callable[[], None]]] = []
             if not torch.cuda.is_available():
-                return
+                return out
 
             def load_4bit() -> None:
                 from transformers import BitsAndBytesConfig
@@ -249,14 +268,28 @@ class PlanSequencerService:
                 )
 
             if prefer_q and bnb:
-                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
-            attempts.append((hf_id, f"cuda fp16 ({label})", load_fp16))
+                out.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
+            out.append((hf_id, f"cuda fp16 ({label})", load_fp16))
             if not prefer_q and bnb:
-                attempts.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
+                out.append((hf_id, f"cuda 4-bit NF4 ({label})", load_4bit))
+            return out
 
-        _add_cuda_strategies(primary, "primary")
-        if fallback != primary:
-            _add_cuda_strategies(fallback, "fallback")
+        primary_cuda = _cuda_strategies_for(primary, "primary")
+        fallback_cuda = _cuda_strategies_for(fallback, "fallback") if fallback != primary else []
+        small_first = bool(settings.planner_prefer_small_gpu_first) and fallback != primary
+        if small_first:
+            cuda_attempts = fallback_cuda + primary_cuda
+            if primary_cuda or fallback_cuda:
+                logger.info(
+                    "Planner load order: smaller checkpoint first (PLANNER_PREFER_SMALL_GPU_FIRST=true); "
+                    "primary=%s fallback=%s",
+                    primary,
+                    fallback,
+                )
+        else:
+            cuda_attempts = primary_cuda + fallback_cuda
+
+        attempts = list(cuda_attempts)
 
         def load_cpu() -> None:
             self._tokenizer = AutoTokenizer.from_pretrained(fallback, trust_remote_code=True)
@@ -305,7 +338,10 @@ class PlanSequencerService:
         self._ensure_loaded()
 
         allowed = {str(c["segment_id"]) for c in candidates if c.get("segment_id")}
-        max_in = settings.planner_max_input_tokens
+        max_in, gen_cap_new = _adjust_planner_limits_for_free_vram(
+            settings.planner_max_input_tokens,
+            settings.planner_max_new_tokens,
+        )
         max_rows = len(candidates)
         cue_max = 200
         messages: list[dict] = []
@@ -345,7 +381,7 @@ class PlanSequencerService:
             inputs = {k: v.to(device) for k, v in inputs.items()}
             pad_id = self._tokenizer.pad_token_id or self._tokenizer.eos_token_id
             gen_kw: dict[str, Any] = {
-                "max_new_tokens": settings.planner_max_new_tokens,
+                "max_new_tokens": gen_cap_new,
                 "pad_token_id": pad_id,
             }
             if settings.planner_temperature > 1e-6:
@@ -354,7 +390,15 @@ class PlanSequencerService:
             else:
                 gen_kw["do_sample"] = False
 
-            max_new = int(settings.planner_max_new_tokens)
+            try:
+                import inspect
+
+                if "cache_implementation" in inspect.signature(self._model.generate).parameters:
+                    gen_kw["cache_implementation"] = "dynamic"
+            except Exception:
+                pass
+
+            max_new = int(gen_cap_new)
             decoded: str | None = None
             last_gen_exc: BaseException | None = None
             prompt_rebuilt_once = False
@@ -405,7 +449,7 @@ class PlanSequencerService:
                         ]
                         inputs = _tokenize_current_prompt()
                         inputs = {k: v.to(device) for k, v in inputs.items()}
-                        max_new = min(256, max(96, int(settings.planner_max_new_tokens) // 2))
+                        max_new = min(256, max(96, int(gen_cap_new) // 2))
                         reclaim_gpu_memory()
                         continue
                     raise PlanSequencerError(
