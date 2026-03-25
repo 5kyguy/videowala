@@ -89,25 +89,126 @@ def _build_user_prompt(candidates: list[dict], user_prompt: str, *, cue_max: int
     return "\n".join(lines)
 
 
-def _extract_json_object(text: str) -> dict[str, Any]:
+def _strip_markdown_json_fences(text: str) -> str:
     text = text.strip()
-    if "```" in text:
-        parts = re.split(r"```(?:json)?", text, flags=re.IGNORECASE)
-        for p in parts:
-            p = p.strip()
-            if p.startswith("{") and "}" in p:
-                text = p
-                break
-    m = re.search(r"\{[\s\S]*\}", text)
-    if not m:
-        raise PlanSequencerError("Model output did not contain a JSON object.")
-    try:
-        obj = json.loads(m.group(0))
-    except json.JSONDecodeError as exc:
-        raise PlanSequencerError(f"Invalid JSON from planner model: {exc}") from exc
-    if not isinstance(obj, dict):
-        raise PlanSequencerError("Model JSON root must be an object.")
-    return obj
+    if "```" not in text:
+        return text
+    for part in re.split(r"```(?:json)?", text, flags=re.IGNORECASE):
+        p = part.strip()
+        if p.startswith("{") or p.startswith("["):
+            return p
+    return text
+
+
+def _recover_truncated_segment_ids_json(text: str) -> dict[str, Any] | None:
+    """
+    When generation hits ``max_new_tokens`` mid-JSON, ``raw_decode`` fails but most ``"segment_id"``
+    lines are complete. Extract those plus an optional unterminated last ``"seg_…`` line.
+    """
+    if '"segment_ids"' not in text:
+        return None
+    idx = text.find('"segment_ids"')
+    sub = text[idx:]
+    lb = sub.find("[")
+    if lb < 0:
+        return None
+    inner = sub[lb + 1 :]
+    ids: list[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'"([^"]+)"', inner):
+        sid = m.group(1).strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    tail = inner.rstrip()
+    if tail and not tail.endswith('"'):
+        last_q = tail.rfind('"')
+        if last_q >= 0:
+            frag = tail[last_q + 1 :].strip().rstrip(",")
+            if frag.startswith("seg_") and frag not in seen:
+                ids.append(frag)
+    if not ids:
+        return None
+    logger.warning(
+        "Planner JSON looked truncated; recovered %s segment_ids from partial output "
+        "(any missing ids will be appended from candidate order).",
+        len(ids),
+    )
+    return {"segment_ids": ids, "rationale": ""}
+
+
+def _planner_new_tokens_floor(num_candidates: int) -> int:
+    """Ensure decode budget scales with list length (many segments → long JSON)."""
+    base = int(settings.planner_max_new_tokens)
+    # ~6–10 tokens per quoted id line + braces/rationale; cap to avoid runaway on huge lists.
+    need = min(8192, max(base, 8 * max(1, num_candidates) + 320))
+    return need
+
+
+def _extract_json_object(text: str) -> dict[str, Any]:
+    """
+    Parse the planner's reply into a dict. Uses ``JSONDecoder.raw_decode`` so the first
+    complete JSON value wins (avoids greedy-regex bugs with nested ``{}`` or trailing prose).
+    """
+    text = _strip_markdown_json_fences(text)
+    if not text:
+        raise PlanSequencerError("Model output was empty.")
+
+    decoder = json.JSONDecoder()
+
+    def _try_object_from_braces(s: str) -> dict[str, Any] | None:
+        i = 0
+        while True:
+            j = s.find("{", i)
+            if j < 0:
+                return None
+            try:
+                val, _end = decoder.raw_decode(s, j)
+            except json.JSONDecodeError:
+                i = j + 1
+                continue
+            if isinstance(val, dict):
+                return val
+            i = j + 1
+
+    obj = _try_object_from_braces(text)
+    if obj is not None:
+        return obj
+
+    # Some models return only a JSON array of segment ids.
+    j = text.find("[")
+    while j >= 0:
+        try:
+            val, _end = decoder.raw_decode(text, j)
+        except json.JSONDecodeError:
+            j = text.find("[", j + 1)
+            continue
+        if isinstance(val, list):
+            return {
+                "segment_ids": [str(x) for x in val],
+                "rationale": "",
+            }
+        j = text.find("[", j + 1)
+
+    # Partial object: find the array value only (broken outer JSON, extra prose, etc.)
+    m = re.search(r'"segment_ids"\s*:\s*\[', text)
+    if m:
+        br = text.find("[", m.start())
+        if br >= 0:
+            try:
+                val, _end = decoder.raw_decode(text, br)
+                if isinstance(val, list) and val:
+                    return {"segment_ids": [str(x) for x in val], "rationale": ""}
+            except json.JSONDecodeError:
+                pass
+
+    recovered = _recover_truncated_segment_ids_json(text)
+    if recovered is not None:
+        return recovered
+
+    snippet = text[:800] + ("…" if len(text) > 800 else "")
+    logger.warning("Planner model output not parseable as JSON (snippet): %s", snippet)
+    raise PlanSequencerError("Model output did not contain a JSON object.")
 
 
 def _validate_permutation(
@@ -365,9 +466,10 @@ class PlanSequencerService:
         self._ensure_loaded()
 
         allowed = {str(c["segment_id"]) for c in candidates if c.get("segment_id")}
+        scaled_new = _planner_new_tokens_floor(len(candidates))
         max_in, gen_cap_new = _adjust_planner_limits_for_free_vram(
             settings.planner_max_input_tokens,
-            settings.planner_max_new_tokens,
+            scaled_new,
         )
         max_rows = len(candidates)
         cue_max = 200

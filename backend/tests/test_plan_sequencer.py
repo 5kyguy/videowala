@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.plan_sequencer import continuity_heuristic_order
+from app.services.plan_sequencer import _extract_json_object, continuity_heuristic_order
 
 
 def test_continuity_heuristic_groups_interleaved_assets() -> None:
@@ -13,3 +13,31 @@ def test_continuity_heuristic_groups_interleaved_assets() -> None:
     ordered, note = continuity_heuristic_order(rows)
     assert ordered == ["s_a1", "s_a2", "s_b1", "s_b2"]
     assert "continuity_heuristic" in note
+
+
+def test_extract_json_object_raw_decode_with_trailing_prose() -> None:
+    text = '{"segment_ids": ["a", "b"], "rationale": "ok"} Here is extra commentary.'
+    assert _extract_json_object(text)["segment_ids"] == ["a", "b"]
+
+
+def test_extract_json_object_markdown_fence() -> None:
+    text = '```json\n{"segment_ids": ["z"], "rationale": ""}\n```'
+    assert _extract_json_object(text)["segment_ids"] == ["z"]
+
+
+def test_extract_json_object_root_array() -> None:
+    text = '["s1", "s2"]'
+    out = _extract_json_object(text)
+    assert out["segment_ids"] == ["s1", "s2"]
+    assert out["rationale"] == ""
+
+
+def test_extract_json_object_truncated_mid_array() -> None:
+    """Generation can stop before closing ``]`` / ``}``; recover complete quoted ids + trailing fragment."""
+    text = """{
+  "segment_ids": [
+    "seg_a",
+    "seg_b",
+    "seg_0ce185bc5133"""
+    out = _extract_json_object(text)
+    assert out["segment_ids"] == ["seg_a", "seg_b", "seg_0ce185bc5133"]
