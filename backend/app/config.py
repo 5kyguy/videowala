@@ -108,7 +108,7 @@ class Settings(BaseModel):
     )
     planner_temperature: float = Field(default_factory=lambda: float(os.getenv("PLANNER_TEMPERATURE", "0.2")))
     # Floor for decode length; actual budget scales up with segment count in ``plan_sequencer``.
-    planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "384")))
+    planner_max_new_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_NEW_TOKENS", "1024")))
     # Hard cap on prompt length (tokens) before left-truncation fallback — avoids multi‑GiB KV on 14 GiB GPUs.
     planner_max_input_tokens: int = Field(default_factory=lambda: int(os.getenv("PLANNER_MAX_INPUT_TOKENS", "3072")))
     # Prefer PyTorch SDPA attention (lower VRAM than eager on many setups). Set to "eager" to disable.

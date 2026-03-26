@@ -182,8 +182,8 @@ def _recover_truncated_segment_ids_json(text: str) -> dict[str, Any] | None:
 def _planner_new_tokens_floor(num_candidates: int) -> int:
     """Ensure decode budget scales with list length (many segments → long JSON)."""
     base = int(settings.planner_max_new_tokens)
-    # ~6–10 tokens per quoted id line + braces/rationale; cap to avoid runaway on huge lists.
-    need = min(8192, max(base, 8 * max(1, num_candidates) + 320))
+    # Long ``seg_…`` ids need more than a few tokens each; + overhead for rationale/braces.
+    need = min(8192, max(base, 14 * max(1, num_candidates) + 448))
     return need
 
 
@@ -352,11 +352,11 @@ def _adjust_planner_limits_for_free_vram(max_in: int, max_new: int) -> tuple[int
         free_b, _total_b = torch.cuda.mem_get_info()
         free_gb = free_b / (1024**3)
         if free_gb < 2.5:
-            return min(max_in, 1024), min(max_new, 96)
+            return min(max_in, 1024), min(max_new, 384)
         if free_gb < 4.0:
-            return min(max_in, 1536), min(max_new, 128)
+            return min(max_in, 1536), min(max_new, 768)
         if free_gb < 6.5:
-            return min(max_in, 2560), min(max_new, 192)
+            return min(max_in, 2560), min(max_new, 1536)
         return max_in, max_new
     except Exception:
         return max_in, max_new
