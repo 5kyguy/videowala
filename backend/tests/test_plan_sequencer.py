@@ -65,6 +65,18 @@ def test_validate_permutation_resolves_truncated_id_prefix() -> None:
     assert out == ["seg_9zzz", "seg_8d2a1b3c4d5e6f7"]
 
 
+def test_validate_permutation_dedupes_prefix_then_full_same_id() -> None:
+    """Truncated fragment and full id both present → one canonical id; keep first in order."""
+    candidates = [
+        {"segment_id": "seg_8d219907e8f7", "asset_id": "a"},
+        {"segment_id": "seg_other", "asset_id": "b"},
+    ]
+    allowed = {c["segment_id"] for c in candidates}
+    full = "seg_8d219907e8f7"
+    out = _validate_permutation(["seg_other", "seg_8d2", full], allowed, candidates)
+    assert out == ["seg_other", full]
+
+
 def test_enforce_asset_contiguity_groups_by_first_seen_asset() -> None:
     candidates = [
         {"segment_id": "a1", "asset_id": "asset_a", "start_s": 0.0},

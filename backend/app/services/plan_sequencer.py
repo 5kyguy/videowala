@@ -285,7 +285,13 @@ def _validate_permutation(
         if sid is None:
             raise PlanSequencerError(f"Unknown segment_id in model output: {raw}")
         if sid in seen:
-            raise PlanSequencerError(f"Duplicate segment_id in model output: {sid}")
+            # Truncated prefix can resolve to the same id as a later full string, or the model repeats a line.
+            logger.warning(
+                "Planner duplicate segment_id after resolution (raw=%r, canonical=%s); keeping first occurrence.",
+                raw,
+                sid,
+            )
+            continue
         seen.add(sid)
         out.append(sid)
     missing = allowed - seen
