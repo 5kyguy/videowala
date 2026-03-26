@@ -4,6 +4,7 @@ from app.services.plan_sequencer import (
     _enforce_asset_contiguity,
     _extract_json_object,
     _prompt_requests_interleaving,
+    _validate_permutation,
     continuity_heuristic_order,
 )
 
@@ -51,6 +52,17 @@ def test_extract_json_object_truncated_mid_array() -> None:
 def test_prompt_requests_interleaving_detects_montage_terms() -> None:
     assert _prompt_requests_interleaving("Make a rapid-cut montage with intercut visuals")
     assert not _prompt_requests_interleaving("Keep the story smooth and chronological")
+
+
+def test_validate_permutation_resolves_truncated_id_prefix() -> None:
+    """Planner output can be cut mid-UUID; unique ``seg_…`` prefix maps to the full segment_id."""
+    candidates = [
+        {"segment_id": "seg_8d2a1b3c4d5e6f7", "asset_id": "a"},
+        {"segment_id": "seg_9zzz", "asset_id": "b"},
+    ]
+    allowed = {c["segment_id"] for c in candidates}
+    out = _validate_permutation(["seg_9zzz", "seg_8d2"], allowed, candidates)
+    assert out == ["seg_9zzz", "seg_8d2a1b3c4d5e6f7"]
 
 
 def test_enforce_asset_contiguity_groups_by_first_seen_asset() -> None:

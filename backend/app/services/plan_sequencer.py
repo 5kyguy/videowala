@@ -253,6 +253,24 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     raise PlanSequencerError("Model output did not contain a JSON object.")
 
 
+def _resolve_planner_segment_id(raw: str, allowed: set[str]) -> str | None:
+    """
+    Map model output to a canonical ``segment_id`` in ``allowed``.
+
+    Exact match wins. Otherwise, if exactly one allowed id has ``allowed.startswith(raw)``
+    (truncated JSON / max_new_tokens mid-string), use that id.
+    """
+    sid = raw.strip()
+    if not sid:
+        return None
+    if sid in allowed:
+        return sid
+    matches = [a for a in allowed if a.startswith(sid)]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def _validate_permutation(
     ordered_ids: list[str],
     allowed: set[str],
@@ -262,9 +280,10 @@ def _validate_permutation(
         raise PlanSequencerError("segment_ids is empty.")
     seen: set[str] = set()
     out: list[str] = []
-    for sid in ordered_ids:
-        if sid not in allowed:
-            raise PlanSequencerError(f"Unknown segment_id in model output: {sid}")
+    for raw in ordered_ids:
+        sid = _resolve_planner_segment_id(raw, allowed)
+        if sid is None:
+            raise PlanSequencerError(f"Unknown segment_id in model output: {raw}")
         if sid in seen:
             raise PlanSequencerError(f"Duplicate segment_id in model output: {sid}")
         seen.add(sid)
