@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import re
@@ -10,6 +11,7 @@ from typing import Any
 
 from ..config import settings
 from ..gpu_memory import reclaim_gpu_memory
+from .ollama_client import ollama_client
 
 logger = logging.getLogger(__name__)
 
@@ -210,7 +212,7 @@ class VlmService:
     def __init__(self) -> None:
         self._processor = None
         self._model: Any | None = None
-        self._model_id = settings.vlm_model_id
+        self._model_id = settings.ollama_vlm_model_id if settings.model_provider == "ollama" else settings.vlm_model_id
         self._effective_model_id: str | None = None
 
     @property
@@ -222,6 +224,12 @@ class VlmService:
 
     def release(self) -> None:
         """Unload VLM weights so the next serial stage can load a different model."""
+        if settings.model_provider == "ollama" and settings.ollama_vlm_model_id:
+            try:
+                ollama_client.unload(model=settings.ollama_vlm_model_id)
+            except Exception:
+                # Best-effort unload; the indexing pipeline should still proceed.
+                pass
         self._model = None
         self._processor = None
         self._effective_model_id = None
@@ -285,6 +293,8 @@ class VlmService:
 
     def _ensure_loaded(self) -> None:
         if settings.stage2_stub_models:
+            return
+        if settings.model_provider == "ollama":
             return
         if self._model is not None and self._processor is not None:
             return
@@ -424,8 +434,12 @@ class VlmService:
                 tags_added=ad,
             )
 
-        self._ensure_loaded()
-        assert self._model is not None and self._processor is not None
+        if settings.model_provider == "ollama":
+            if not settings.ollama_vlm_model_id:
+                raise RuntimeError("MODEL_PROVIDER=ollama but OLLAMA_VLM_MODEL_ID is not set.")
+        else:
+            self._ensure_loaded()
+            assert self._model is not None and self._processor is not None
 
         image_paths: list[Path] = []
         _vlm_scratch_files: list[Path] = []
@@ -454,40 +468,84 @@ class VlmService:
                 tags_added=ad,
             )
 
-        import torch
-
-        device = next(self._model.parameters()).device
         prompt = _build_vlm_prompt(predefined_tags=pre, event_context=event_context)
 
         candidates: list[tuple[str, float | None, list[str]]] = []
         all_tags_flat: list[str] = []
 
-        for image_path in image_paths:
-            if not image_path.exists():
-                continue
-            try:
-                uri = _file_uri(image_path)
-                cleaned = self._generate_one_image(image_uri=uri, prompt=prompt, device=str(device))
-            except Exception:
-                continue
+        if settings.model_provider == "ollama":
+            for image_path in image_paths:
+                if not image_path.exists():
+                    continue
+                try:
+                    raw = image_path.read_bytes()
+                    b64 = base64.b64encode(raw).decode("utf-8")
+                    cleaned = ollama_client.generate(
+                        model=settings.ollama_vlm_model_id,
+                        prompt=prompt,
+                        images=[b64],
+                        keep_alive=settings.ollama_keep_alive_stage,
+                        stream=False,
+                        # Ask Ollama to emit JSON so our existing parser works.
+                        format="json",
+                        options={"temperature": 0.0},
+                    )
+                except Exception:
+                    continue
 
-            for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
-                if marker in cleaned:
-                    cleaned = cleaned.split(marker, 1)[1].strip()
-                    break
+                for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
+                    if marker in cleaned:
+                        cleaned = cleaned.split(marker, 1)[1].strip()
+                        break
 
-            payload = _parse_json_block(cleaned) or {}
-            frame_caption = str(payload.get("caption") or "").strip()
-            conf = _normalize_confidence(payload.get("caption_confidence"))
-            tags_raw = payload.get("tags") or []
-            frame_tags: list[str] = []
-            if isinstance(tags_raw, list):
-                frame_tags = [str(t).strip() for t in tags_raw if str(t).strip()]
-                all_tags_flat.extend(frame_tags)
-            if not frame_caption and cleaned:
-                frame_caption = cleaned[:400]
-            if frame_caption:
-                candidates.append((frame_caption, conf, frame_tags))
+                payload = _parse_json_block(cleaned) or {}
+                frame_caption = str(payload.get("caption") or "").strip()
+                conf = _normalize_confidence(payload.get("caption_confidence"))
+                tags_raw = payload.get("tags") or []
+                frame_tags: list[str] = []
+                if isinstance(tags_raw, list):
+                    frame_tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+                    all_tags_flat.extend(frame_tags)
+                if not frame_caption and cleaned:
+                    frame_caption = cleaned[:400]
+                if frame_caption:
+                    candidates.append((frame_caption, conf, frame_tags))
+        else:
+            import torch
+
+            device = next(self._model.parameters()).device
+            for image_path in image_paths:
+                if not image_path.exists():
+                    continue
+                try:
+                    uri = _file_uri(image_path)
+                    cleaned = self._generate_one_image(image_uri=uri, prompt=prompt, device=str(device))
+                except Exception:
+                    continue
+
+                for marker in ("Assistant:", "assistant:", "ASSISTANT:"):
+                    if marker in cleaned:
+                        cleaned = cleaned.split(marker, 1)[1].strip()
+                        break
+
+                payload = _parse_json_block(cleaned) or {}
+                frame_caption = str(payload.get("caption") or "").strip()
+                conf = _normalize_confidence(payload.get("caption_confidence"))
+                tags_raw = payload.get("tags") or []
+                frame_tags: list[str] = []
+                if isinstance(tags_raw, list):
+                    frame_tags = [str(t).strip() for t in tags_raw if str(t).strip()]
+                    all_tags_flat.extend(frame_tags)
+                if not frame_caption and cleaned:
+                    frame_caption = cleaned[:400]
+                if frame_caption:
+                    candidates.append((frame_caption, conf, frame_tags))
+
+        # Choose best frame caption/tags across extracted frames.
+        # This mirrors the HF path logic.
+        # (We keep this logic shared between providers to reduce behavioral drift.)
+        # candidates is populated by the provider-specific block above.
+        # If candidates is empty, we fall back to stub caption/tags as before.
 
         best_caption = ""
         best_conf: float | None = None

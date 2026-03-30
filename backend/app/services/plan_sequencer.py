@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from ..config import settings
 from ..gpu_memory import prepare_gpu_for_next_stage, reclaim_gpu_memory
+from .ollama_client import ollama_client
 
 logger = logging.getLogger(__name__)
 
@@ -396,6 +397,11 @@ class PlanSequencerService:
         self._effective_model_id: str | None = None
 
     def release(self) -> None:
+        if settings.model_provider == "ollama" and settings.ollama_planner_model_id:
+            try:
+                ollama_client.unload(model=settings.ollama_planner_model_id)
+            except Exception:
+                pass
         m, t = self._model, self._tokenizer
         self._model = None
         self._tokenizer = None
@@ -413,6 +419,8 @@ class PlanSequencerService:
 
     def _ensure_loaded(self) -> None:
         if settings.stage2_stub_models:
+            return
+        if settings.model_provider == "ollama":
             return
         if self._model is not None:
             return
@@ -529,6 +537,107 @@ class PlanSequencerService:
             return [], "no_candidates"
         if settings.stage2_stub_models:
             return continuity_heuristic_order(candidates)
+
+        if settings.model_provider == "ollama":
+            if not settings.ollama_planner_model_id:
+                raise PlanSequencerError("MODEL_PROVIDER=ollama but OLLAMA_PLANNER_MODEL_ID is not set.")
+
+            allowed = {str(c["segment_id"]) for c in candidates if c.get("segment_id")}
+            scaled_new = _planner_new_tokens_floor(len(candidates))
+            max_in, gen_cap_new = _adjust_planner_limits_for_free_vram(settings.planner_max_input_tokens, scaled_new)
+            max_rows = len(candidates)
+            cue_max = 200
+            decoded: str | None = None
+            model_id_for_note = settings.ollama_planner_model_id
+
+            def _approx_token_count(s: str) -> int:
+                # Crude char->token heuristic to mimic tokenizer gating without loading a tokenizer locally.
+                # Works well enough for prompt down-selection; quality is still validated by JSON parsing below.
+                return max(1, len(s) // 4)
+
+            system_directive = "You reply with a single JSON object only. No markdown fences unless necessary."
+            prompt_text: str | None = None
+            for _ in range(16):
+                user = _build_user_prompt(candidates[:max_rows], user_prompt, cue_max=cue_max)
+                candidate_prompt = f"{system_directive}\n\n{user}"
+                if _approx_token_count(candidate_prompt) <= max_in:
+                    prompt_text = candidate_prompt
+                    break
+                if cue_max > 48:
+                    cue_max = max(48, cue_max - 32)
+                elif max_rows > 8:
+                    max_rows = max(8, max_rows - 8)
+                else:
+                    prompt_text = candidate_prompt
+                    break
+
+            if prompt_text is None:
+                raise PlanSequencerError("Planner prompt could not be built.")
+
+            max_new = int(gen_cap_new)
+            options: dict[str, Any] = {
+                "num_predict": max_new,
+            }
+            if settings.planner_temperature > 1e-6:
+                options["temperature"] = settings.planner_temperature
+            else:
+                options["temperature"] = 0.0
+
+            try:
+                last_gen_exc: BaseException | None = None
+                for gen_try in range(10):
+                    try:
+                        decoded = ollama_client.generate(
+                            model=settings.ollama_planner_model_id,
+                            prompt=prompt_text,
+                            keep_alive=settings.ollama_keep_alive_stage,
+                            stream=False,
+                            # Ask for valid JSON to reduce parsing failures.
+                            format="json",
+                            options=options,
+                        )
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        last_gen_exc = exc
+                        msg = str(exc).lower()
+                        if "out of memory" not in msg and "oom" not in msg:
+                            raise PlanSequencerError(f"Planner model generation failed: {exc}") from exc
+                        logger.warning(
+                            "Planner generate OLLAMA OOM (attempt %s/10); max_new_tokens=%s",
+                            gen_try + 1,
+                            max_new,
+                        )
+                        if max_new > 64:
+                            max_new = max(64, max_new // 2)
+                            options["num_predict"] = max_new
+                            continue
+                        raise
+
+                if decoded is None:
+                    raise PlanSequencerError(f"Planner model generation failed after {last_gen_exc!r}")
+
+                data = _extract_json_object(decoded)
+                raw_ids = data.get("segment_ids")
+                rationale = str(data.get("rationale", "") or "").strip()
+                if not isinstance(raw_ids, list):
+                    raise PlanSequencerError('Model JSON must include "segment_ids" array.')
+
+                ordered = [str(x) for x in raw_ids]
+                ordered = _validate_permutation(ordered, allowed, candidates)
+                if not _prompt_requests_interleaving(user_prompt):
+                    contiguous = _enforce_asset_contiguity(ordered, candidates)
+                    if contiguous and contiguous != ordered:
+                        ordered = contiguous
+                        rationale = f"{rationale}; continuity_enforced".strip("; ")
+                mid = model_id_for_note
+                note = f"model={mid}; {rationale}" if rationale else f"model={mid}"
+                return ordered, note
+            except PlanSequencerError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                raise PlanSequencerError(f"Planner model generation failed: {exc}") from exc
+            finally:
+                self.release()
 
         self._ensure_loaded()
 

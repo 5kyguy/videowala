@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +47,12 @@ class Settings(BaseModel):
     app_name: str = "Videowala Backend"
     # If unset, defaults to FALSE (real model mode). If TRUE, use deterministic stubbed outputs (no GPU required).
     dev_mode: bool = Field(default_factory=lambda: _parse_bool(os.getenv("DEV_MODE"), False))
+    # Model provider for real inference.
+    # - transformers: local HF/torch loading (current default)
+    # - ollama: call the local Ollama HTTP API (configured via OLLAMA_* model ids)
+    model_provider: Literal["transformers", "ollama"] = Field(
+        default_factory=lambda: (os.getenv("MODEL_PROVIDER", "transformers").strip().lower() or "transformers")
+    )
     # Paths are anchored at the project root so running from `backend/` or the repo root behaves the same.
     storage_root: str = Field(default_factory=lambda: str(PROJECT_ROOT / "storage"))
     scratch_root: str = Field(default_factory=lambda: str(PROJECT_ROOT / "tmp"))
@@ -54,6 +61,14 @@ class Settings(BaseModel):
     # Stage 2 vector store (pgvector)
     pg_dsn: str = Field(default_factory=lambda: os.getenv("PG_DSN", "postgresql://videowala:videowala@localhost:5432/videowala"))
     stage2_stub_models: bool = Field(default_factory=lambda: _parse_bool(os.getenv("DEV_MODE"), False))
+
+    # Ollama settings (used when model_provider="ollama")
+    ollama_base_url: str = Field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
+    # How long each stage model is kept warm after a request. Unload uses keep_alive=0.
+    ollama_keep_alive_stage: str = Field(default_factory=lambda: os.getenv("OLLAMA_KEEP_ALIVE_STAGE", "5m"))
+    ollama_vlm_model_id: str = Field(default_factory=lambda: os.getenv("OLLAMA_VLM_MODEL_ID", "").strip())
+    ollama_embedding_model_id: str = Field(default_factory=lambda: os.getenv("OLLAMA_EMBEDDING_MODEL_ID", "").strip())
+    ollama_planner_model_id: str = Field(default_factory=lambda: os.getenv("OLLAMA_PLANNER_MODEL_ID", "").strip())
     embedding_model_id: str = Field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL_ID", "Alibaba-NLP/gte-Qwen2-7B-instruct")
     )

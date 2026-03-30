@@ -41,14 +41,21 @@ Key settings (see `backend/app/config.py`):
 - **Database**:
   - `PG_DSN` → Postgres DSN for pgvector-backed semantic search
 - **Models (real mode, GPU preferred)**:
+  - `MODEL_PROVIDER` → `transformers` (default) or `ollama`
   - `VLM_MODEL_ID` → [`Qwen/Qwen2.5-VL-7B-Instruct`](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct) by default (`qwen-vl-utils` + `transformers>=4.48`)
   - `EMBEDDING_MODEL_ID` → [`Alibaba-NLP/gte-Qwen2-7B-instruct`](https://huggingface.co/Alibaba-NLP/gte-Qwen2-7B-instruct) by default; must match `EMBEDDING_VECTOR_DIM` (**3584**)
   - `EMBEDDING_VECTOR_DIM` → pgvector column size; changing it triggers `asset_vectors` rebuild on startup (see `migrate_pgvector`)
+  - `OLLAMA_BASE_URL` (used when `MODEL_PROVIDER=ollama`) → `http://localhost:11434`
+  - `OLLAMA_VLM_MODEL_ID` (used when `MODEL_PROVIDER=ollama`) → Ollama model name for VLM (vision caption + tags)
+  - `OLLAMA_EMBEDDING_MODEL_ID` (used when `MODEL_PROVIDER=ollama`) → Ollama embedding model name
+  - `OLLAMA_PLANNER_MODEL_ID` (used when `MODEL_PROVIDER=ollama`) → Ollama text LLM model name for segment reordering
+  - `OLLAMA_KEEP_ALIVE_STAGE` (used when `MODEL_PROVIDER=ollama`) → e.g. `5m` (how long models stay warm during a stage)
   - `OCR_TRIGGER_TAGS` → comma-separated VLM tag names that trigger Paddle OCR after captioning (e.g. `text,signage,document,readable_text`)
 - **OCR** uses **PaddleOCR** only; per-event `ocr_languages` on the event record selects the Paddle `lang` code (e.g. `en`, `hi`, `gu`).
 - **Indexing UX**:
   - `INDEXING_PROGRESS` → `0` / `1` to force-disable/force-enable tqdm progress bars
   - `INDEX_WORKERS` → size of the index job thread pool (default **`1`**, serial indexing)
+  - When using `MODEL_PROVIDER=ollama`, keep `INDEX_WORKERS=1` (to avoid concurrent stage calls while Ollama unloads models between stages).
   - `IMAGE_INDEX_SEMANTIC_CULL_PERCENT` → when `POST /assets` includes **`semantic_prompt`** for images, fraction of image segments to keep after semantic ranking (default **`0.5`**)
 - **Planning (video previews)**:
   - `PLANNER_MODEL_ENABLED` → default `true`; when `true`, after deterministic segment selection the backend runs **`Qwen/Qwen2.5-7B-Instruct`** to reorder `segment_ids` for narrative flow and shot continuity (`set_order.strategy` = `preserve_planner`). Set to `false` to keep legacy ordering only (highlight / chronological / person-focus strategies).
@@ -105,3 +112,4 @@ Runtime behavior is controlled by `DEV_MODE` in `backend/.env` (loaded automatic
   - VLM, OCR, ASR, embeddings, and face pipelines run with real models (GPU preferred; some paths fall back to CPU if needed).
 - **Stub mode**: `DEV_MODE=true`
   - Deterministic stubbed outputs for tests/CI only; not intended for normal local usage of this repo.
+- `MODEL_PROVIDER=ollama` switches VLM, planner sequencing, and embeddings to Ollama HTTP API calls; `DEV_MODE` still forces stubs regardless of provider.

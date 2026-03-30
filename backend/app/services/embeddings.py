@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ..config import settings
 from ..gpu_memory import prepare_gpu_for_next_stage, reclaim_gpu_memory
+from .ollama_client import ollama_client
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,9 @@ def _is_cuda_oom(exc: BaseException) -> bool:
 class EmbeddingService:
     def __init__(self) -> None:
         self._model = None
-        self._model_id = settings.embedding_model_id
+        self._model_id = (
+            settings.ollama_embedding_model_id if settings.model_provider == "ollama" else settings.embedding_model_id
+        )
         self._load_strategy: str | None = None
 
     @property
@@ -158,6 +161,11 @@ class EmbeddingService:
 
     def release(self) -> None:
         """Unload embedding weights so other stages can use the GPU."""
+        if settings.model_provider == "ollama" and settings.ollama_embedding_model_id:
+            try:
+                ollama_client.unload(model=settings.ollama_embedding_model_id)
+            except Exception:
+                pass
         m = self._model
         self._model = None
         self._load_strategy = None
@@ -166,6 +174,8 @@ class EmbeddingService:
 
     def _ensure_model(self) -> None:
         if settings.stage2_stub_models:
+            return
+        if settings.model_provider == "ollama":
             return
         if self._model is not None:
             return
@@ -266,6 +276,26 @@ class EmbeddingService:
             return EmbeddingResult(model=self._model_id, vector=_deterministic_vector("empty"))
         if settings.stage2_stub_models:
             return EmbeddingResult(model=self._model_id, vector=_deterministic_vector(f"stub:{normalized}"))
+
+        if settings.model_provider == "ollama":
+            if not settings.ollama_embedding_model_id:
+                raise RuntimeError("MODEL_PROVIDER=ollama but OLLAMA_EMBEDDING_MODEL_ID is not set.")
+            embeddings = ollama_client.embed(
+                model=settings.ollama_embedding_model_id,
+                input_texts=[normalized],
+                dimensions=settings.embedding_vector_dim,
+                truncate=True,
+                keep_alive=settings.ollama_keep_alive_stage,
+            )
+            if not embeddings:
+                raise RuntimeError("Ollama embedding response was empty.")
+            vec = embeddings[0]
+            if settings.embedding_vector_dim and len(vec) != settings.embedding_vector_dim:
+                raise RuntimeError(
+                    f"Ollama embedding dimension mismatch: expected {settings.embedding_vector_dim}, got {len(vec)}."
+                )
+            return EmbeddingResult(model=settings.ollama_embedding_model_id, vector=[float(x) for x in vec])
+
         self._ensure_model()
         assert self._model is not None
         if for_query:
