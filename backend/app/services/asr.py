@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -25,10 +27,62 @@ def _torch_gpu_available() -> bool:
         return False
 
 
+def _ensure_cuda_runtime_loaded() -> bool:
+    """Best-effort loader for CUDA runtime libs required by ctranslate2/faster-whisper."""
+    try:
+        ctypes.CDLL("libcublas.so.12")
+        return True
+    except OSError:
+        pass
+
+    search_roots: list[str] = []
+    extra = os.getenv("CUDA_LIBRARY_PATHS", "").strip()
+    if extra:
+        search_roots.extend([p.strip() for p in extra.split(":") if p.strip()])
+    cuda_home = os.getenv("CUDA_HOME", "").strip()
+    if cuda_home:
+        search_roots.extend([f"{cuda_home}/lib64", f"{cuda_home}/targets/x86_64-linux/lib"])
+    search_roots.extend(
+        [
+            "/usr/local/cuda/lib64",
+            "/usr/local/cuda/targets/x86_64-linux/lib",
+            "/usr/local/cuda-12/lib64",
+            "/usr/local/cuda-12.0/lib64",
+            "/usr/local/cuda-12.1/lib64",
+            "/usr/local/cuda-12.2/lib64",
+            "/usr/local/cuda-12.3/lib64",
+            "/usr/local/cuda-12.4/lib64",
+            "/usr/lib/x86_64-linux-gnu",
+        ]
+    )
+
+    seen: set[str] = set()
+    for root in search_roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        lib_path = Path(root) / "libcublas.so.12"
+        if not lib_path.exists():
+            continue
+        try:
+            ctypes.CDLL(str(lib_path))
+            # Preserve this path for downstream dynamic loads done by model libs.
+            current = os.environ.get("LD_LIBRARY_PATH", "")
+            os.environ["LD_LIBRARY_PATH"] = f"{root}:{current}" if current else root
+            logger.info("Loaded CUDA runtime library from %s", lib_path)
+            return True
+        except OSError:
+            continue
+    return False
+
+
 class AsrService:
     def __init__(self) -> None:
         self._model = None
         self._device: str | None = None
+        # If we attempted CUDA but the CUDA runtime libs aren't loadable (e.g. missing libcublas.so),
+        # flip this to avoid repeated failures and keep the indexing job alive.
+        self._force_cpu: bool = False
 
     @property
     def model_name(self) -> str:
@@ -49,10 +103,27 @@ class AsrService:
             from faster_whisper import WhisperModel
         except Exception as exc:  # noqa: BLE001
             raise RuntimeError("faster-whisper is required when stage2_stub_models=False") from exc
-        use_gpu = _torch_gpu_available()
+        use_gpu = (not self._force_cpu) and _torch_gpu_available() and _ensure_cuda_runtime_loaded()
         self._device = "cuda" if use_gpu else "cpu"
         compute_type = "float16" if use_gpu else "int8"
-        self._model = WhisperModel("large-v3-turbo", device=self._device, compute_type=compute_type)
+        try:
+            self._model = WhisperModel("large-v3-turbo", device=self._device, compute_type=compute_type)
+        except RuntimeError as exc:
+            # Handle cases where torch reports CUDA availability but CUDA runtime libs
+            # (like libcublas) are missing on the host/container.
+            msg = str(exc)
+            if self._device == "cuda" and "libcublas" in msg and ("not found" in msg or "cannot be loaded" in msg):
+                logger.warning(
+                    "CUDA runtime libs missing for faster-whisper (will retry on CPU). error=%s",
+                    msg[:500],
+                )
+                self.release()
+                self._force_cpu = True
+                self._device = "cpu"
+                self._model = WhisperModel("large-v3-turbo", device=self._device, compute_type="int8")
+                compute_type = "int8"
+            else:
+                raise
         logger.info("Whisper model loaded (device=%s, compute_type=%s).", self._device, compute_type)
 
     def _extract_audio(self, video_path: Path, out_path: Path) -> bool:
@@ -100,7 +171,25 @@ class AsrService:
             return []
         try:
             # language=None: auto-detect (English, Hindi, Gujarati, etc.) per clip.
-            segments, info = self._model.transcribe(str(wav), language=None, task="transcribe")
+            try:
+                segments, info = self._model.transcribe(str(wav), language=None, task="transcribe")
+            except RuntimeError as exc:
+                # Some CUDA builds of PyTorch/faster-whisper can report CUDA availability even when
+                # the CUDA runtime libraries are missing (common on CPU-only hosts).
+                # Example: "Library libcublas.so.12 is not found or cannot be loaded"
+                msg = str(exc)
+                if self._device == "cuda" and "libcublas" in msg and ("not found" in msg or "cannot be loaded" in msg):
+                    logger.warning(
+                        "CUDA runtime libs missing for faster-whisper (will retry on CPU). error=%s",
+                        msg[:500],
+                    )
+                    self.release()
+                    self._force_cpu = True
+                    self._ensure_model()
+                    assert self._model is not None
+                    segments, info = self._model.transcribe(str(wav), language=None, task="transcribe")
+                else:
+                    raise
             lang = getattr(info, "language", None)
             if lang:
                 logger.info("Whisper detected language=%s for %s", lang, target.name)

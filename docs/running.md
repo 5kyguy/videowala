@@ -51,6 +51,7 @@ Key settings (see `backend/app/config.py`):
   - `OLLAMA_PLANNER_MODEL_ID` (used when `MODEL_PROVIDER=ollama`) → Ollama text LLM model name for segment reordering
   - `OLLAMA_KEEP_ALIVE_STAGE` (used when `MODEL_PROVIDER=ollama`) → e.g. `5m` (how long models stay warm during a stage)
   - `OCR_TRIGGER_TAGS` → comma-separated VLM tag names that trigger Paddle OCR after captioning (e.g. `text,signage,document,readable_text`)
+  - `CUDA_LIBRARY_PATHS` → optional colon-separated CUDA lib dirs (used by ASR to resolve `libcublas.so.12` if not on default linker path)
 - **OCR** uses **PaddleOCR** only; per-event `ocr_languages` on the event record selects the Paddle `lang` code (e.g. `en`, `hi`, `gu`).
 - **Indexing UX**:
   - `INDEXING_PROGRESS` → `0` / `1` to force-disable/force-enable tqdm progress bars
@@ -67,6 +68,18 @@ Health check:
 ```bash
 curl -s http://localhost:8000/health | jq .
 ```
+
+GPU runtime sanity checks (for `faster-whisper` / ASR CUDA path):
+
+```bash
+python - <<'PY'
+import ctypes
+ctypes.CDLL("libcublas.so.12")
+print("ok: libcublas.so.12 loadable")
+PY
+```
+
+If this fails but CUDA is installed, set `CUDA_LIBRARY_PATHS` in `backend/.env` to the directory containing `libcublas.so.12` (for example `/usr/local/cuda/lib64` or `/usr/lib/x86_64-linux-gnu`) and restart the backend.
 
 ## Frontend
 
