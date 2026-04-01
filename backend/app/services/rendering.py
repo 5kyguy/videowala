@@ -275,6 +275,66 @@ def _first_video_stream(data: dict) -> dict | None:
     return None
 
 
+def _ffprobe_format_duration(path: Path) -> float | None:
+    """Container-reported duration (seconds), if present."""
+    try:
+        data = _ffprobe_json(path)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None
+    fmt = data.get("format") or {}
+    d = fmt.get("duration")
+    if d is None:
+        return None
+    try:
+        return float(d)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ffprobe_stream_duration(path: Path, codec_type: str) -> float | None:
+    try:
+        data = _ffprobe_json(path)
+    except (subprocess.CalledProcessError, json.JSONDecodeError, OSError):
+        return None
+    for s in data.get("streams") or []:
+        if s.get("codec_type") != codec_type:
+            continue
+        d = s.get("duration")
+        if d is not None:
+            try:
+                return float(d)
+            except (TypeError, ValueError):
+                pass
+    return _ffprobe_format_duration(path)
+
+
+def _log_av_duration_alignment(path: Path, *, context: str, tolerance_s: float = 0.12) -> None:
+    """Warn when muxed video/audio stream lengths disagree (common sync symptom)."""
+    vd = _ffprobe_stream_duration(path, "video")
+    ad = _ffprobe_stream_duration(path, "audio")
+    if vd is None or ad is None:
+        logger.debug("%s: could not probe stream durations for %s", context, path.name)
+        return
+    drift = abs(vd - ad)
+    if drift > tolerance_s:
+        logger.warning(
+            "%s: A/V duration mismatch in %s: video=%.3fs audio=%.3fs (delta=%.3fs)",
+            context,
+            path.name,
+            vd,
+            ad,
+            drift,
+        )
+    else:
+        logger.info(
+            "%s: A/V duration OK for %s: video=%.3fs audio=%.3fs",
+            context,
+            path.name,
+            vd,
+            ad,
+        )
+
+
 def _video_avg_frame_rate(path: Path) -> str | None:
     try:
         data = _ffprobe_json(path)
@@ -393,7 +453,38 @@ def _encode_video_audio_args() -> list[str]:
         "aac",
         "-b:a",
         "128k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
     ]
+
+
+def _format_filter_time(value: float) -> str:
+    """Stable decimal formatting for ffmpeg filter trim/atrim endpoints."""
+    s = f"{float(value):.6f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+def _build_clip_filter_complex(
+    start_s: float,
+    duration_s: float,
+    transpose: int,
+    orientation: str,
+    ref_fps: str,
+) -> str:
+    """Trim video/audio to identical [start, end) with shared PTS origin and CFR video."""
+    end_s = float(start_s) + max(0.05, float(duration_s))
+    st = _format_filter_time(start_s)
+    en = _format_filter_time(end_s)
+    vf_geo = _build_transpose_and_crop_vf(transpose, orientation)
+    fps = (ref_fps or _DEFAULT_IMAGE_FPS).strip() or _DEFAULT_IMAGE_FPS
+    fps_filter = f"fps={fps}"
+    # Single filter_complex graph: same time window for v/a avoids -ss before -i desync.
+    return (
+        f"[0:v]trim=start={st}:end={en},setpts=PTS-STARTPTS,{vf_geo},{fps_filter}[vout];"
+        f"[0:a]atrim=start={st}:end={en},asetpts=PTS-STARTPTS,aresample=48000[aout]"
+    )
 
 
 def _prepare_video_clip_range(
@@ -402,19 +493,22 @@ def _prepare_video_clip_range(
     start_s: float,
     seconds: float,
     *,
-    vf: str,
+    transpose: int,
+    orientation: str,
+    ref_fps: str,
 ) -> list[str]:
+    fc = _build_clip_filter_complex(start_s, seconds, transpose, orientation, ref_fps)
     return [
         "ffmpeg",
         "-y",
-        "-ss",
-        str(max(0.0, start_s)),
         "-i",
         input_file,
-        "-t",
-        str(max(0.05, seconds)),
-        "-vf",
-        vf,
+        "-filter_complex",
+        fc,
+        "-map",
+        "[vout]",
+        "-map",
+        "[aout]",
         *_encode_video_audio_args(),
         str(output_clip),
     ]
@@ -436,13 +530,15 @@ def _pad_to_canvas(input_path: Path, output_path: Path, target_w: int, target_h:
     ]
 
 
-def _concat_demuxer(prepared_clips: list[Path], output_file: str, duration_seconds: int) -> None:
+def _concat_demuxer(prepared_clips: list[Path], output_file: str, duration_seconds: float) -> None:
     scratch_dir = prepared_clips[0].parent
     concat_list = scratch_dir / "concat.txt"
     concat_list.write_text(
         "".join([f"file '{clip.resolve()}'\n" for clip in prepared_clips]),
         encoding="utf-8",
     )
+    # Bound output to planned duration; +genpts avoids PTS gaps across segment joins when re-encoding.
+    dur = max(0.1, float(duration_seconds))
     cmd = [
         "ffmpeg",
         "-y",
@@ -453,7 +549,9 @@ def _concat_demuxer(prepared_clips: list[Path], output_file: str, duration_secon
         "-i",
         str(concat_list),
         "-t",
-        str(max(1, int(duration_seconds))),
+        _format_filter_time(dur),
+        "-fflags",
+        "+genpts",
         *_encode_video_audio_args(),
         "-movflags",
         "+faststart",
@@ -548,14 +646,22 @@ def _render_from_inputs(
             logger.warning("Skipping clip with zero allocated duration: start=%s end=%s", start_s, end_s)
             continue
         transpose = int(item.get("display_transpose", 0) or 0)
-        vf = _build_transpose_and_crop_vf(transpose, orientation)
         if source.suffix.lower() in IMAGE_EXTS:
             raise UnsafeRenderCommandError(
                 f"Image inputs are not used for video render: {source.name}. Use photo curation for stills."
             )
-        cmd = _prepare_video_clip_range(str(source), clip_path, start_s, seconds_each, vf=vf)
+        cmd = _prepare_video_clip_range(
+            str(source),
+            clip_path,
+            start_s,
+            seconds_each,
+            transpose=transpose,
+            orientation=orientation,
+            ref_fps=ref_fps,
+        )
         logger.info("Render %s: encoding clip %d/%d from %s", job_id or "?", index + 1, n_clips, source.name)
         _run_cmd(cmd)
+        _log_av_duration_alignment(clip_path, context=f"segment_{index}")
         prepared_raw.append(clip_path)
         if job_id and n_clips > 0:
             pct = 25 + int(((index + 1) / n_clips) * 40)
@@ -591,7 +697,8 @@ def _render_from_inputs(
             prepared_final.append(outp)
 
     logger.info("Render %s: concatenating %d clip(s) (orientation=%s)", job_id or "?", len(prepared_final), orientation)
-    _concat_demuxer(prepared_final, output_file, duration_seconds=duration_seconds)
+    _concat_demuxer(prepared_final, output_file, duration_seconds=float(duration_seconds))
+    _log_av_duration_alignment(Path(output_file), context="final_output")
 
 
 def create_render_job(

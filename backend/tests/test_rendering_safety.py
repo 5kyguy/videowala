@@ -10,6 +10,9 @@ from app.repositories import AssetRepository, EventRepository, next_id
 from app.schemas import Asset, Event, OutputType, PlannerAction, PlannerPlan
 from app.services.rendering import (
     _allocate_clip_seconds,
+    _build_clip_filter_complex,
+    _concat_demuxer,
+    _format_filter_time,
     _normalize_and_merge_clip_inputs,
     _prune_clips_to_budget,
     UnsafeRenderCommandError,
@@ -153,6 +156,45 @@ def test_allocate_clip_seconds_exact_target_sum() -> None:
     out = _allocate_clip_seconds(12, clips, min_clip_seconds=3)
     assert sum(out) == 12
     assert all(1 <= x <= 8 for x in out)
+
+
+def test_clip_filter_complex_trims_video_and_audio_together() -> None:
+    """Regression: segment extraction must use trim+atrim (not -ss before -i) to avoid A/V drift."""
+    fc = _build_clip_filter_complex(
+        start_s=12.5,
+        duration_s=8.0,
+        transpose=0,
+        orientation="landscape",
+        ref_fps="30",
+    )
+    assert "trim=start=12.5:end=20.5" in fc.replace(" ", "")
+    assert "atrim=start=12.5:end=20.5" in fc.replace(" ", "")
+    assert "setpts=PTS-STARTPTS" in fc
+    assert "asetpts=PTS-STARTPTS" in fc
+    assert "[vout]" in fc and "[aout]" in fc
+    assert "fps=30" in fc
+
+
+def test_format_filter_time_strips_trailing_zeros() -> None:
+    assert _format_filter_time(10.0) == "10"
+    assert _format_filter_time(1.25) == "1.25"
+
+
+def test_concat_demuxer_includes_genpts_for_mux_stability(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[list[str]] = []
+
+    def capture(cmd: list[str]) -> None:
+        captured.append(cmd)
+
+    monkeypatch.setattr("app.services.rendering._run_cmd", capture)
+    a = tmp_path / "a.mp4"
+    b = tmp_path / "b.mp4"
+    a.write_bytes(b"")
+    b.write_bytes(b"")
+    _concat_demuxer([a, b], str(tmp_path / "out.mp4"), duration_seconds=60.0)
+    assert captured, "expected concat command to be built"
+    assert "+genpts" in captured[0]
+    assert "-fflags" in captured[0]
 
 
 def test_merge_contiguous_same_asset_ranges() -> None:

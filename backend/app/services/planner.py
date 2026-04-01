@@ -143,7 +143,10 @@ def _filter_person_focus_pool(
             for f in request.include_faces
         )
     ]
-    if len(matched) >= max(4, min(len(kept), len(kept) // 3 + 1)):
+    # Prefer the face-matched subset whenever we have enough signal; lower bar than before
+    # so person-focus reels do not fall back to unrelated segments as often.
+    need = max(3, min(len(kept), (len(kept) + 2) // 3))
+    if len(matched) >= need:
         return matched
     return kept
 
@@ -196,15 +199,28 @@ def _score_segments(
         if request.include_faces:
             hit = any(face_id in ctx["faces"] for face_id in request.include_faces)
             if output_type == OutputType.person_focus_reel:
-                face_bonus = 0.22 if hit else -0.08
+                # Strong preference for indexed face matches when building a person-focused reel.
+                face_bonus = 0.34 if hit else -0.12
             else:
                 face_bonus = 0.12 if hit else -0.05
         include_bonus = 0.15 if seg.asset_id in request.include_asset_ids else 0.0
+        # Prompt terms (e.g. person names) appearing in captions/transcripts/OCR for this asset.
+        ctx_text = " ".join(ctx["text"]).lower()
+        name_focus_bonus = 0.0
+        if output_type == OutputType.person_focus_reel and prompt_tokens:
+            hits = sum(1 for t in prompt_tokens if len(t) >= 3 and t in ctx_text)
+            name_focus_bonus = min(0.2, 0.065 * hits)
         # Blend lexical overlap with semantic retrieval score (both in ~0..1).
         relevance = min(1.0, 0.32 * overlap + 0.38 * sem)
         final_score = max(
             0.0,
-            min(1.0, round(float(seg.score) + relevance + face_bonus + include_bonus, 4)),
+            min(
+                1.0,
+                round(
+                    float(seg.score) + relevance + face_bonus + include_bonus + name_focus_bonus,
+                    4,
+                ),
+            ),
         )
 
         signature = f"{asset.media_type}:{asset.media_path}:{round(seg.start_s,1)}:{round(seg.end_s,1)}"
