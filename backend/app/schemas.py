@@ -110,6 +110,7 @@ class Asset(BaseModel):
     media_path: str
     media_type: Literal["image", "video"]
     created_at: datetime
+    content_sha256: str | None = None
 
 
 class AssetProxy(BaseModel):

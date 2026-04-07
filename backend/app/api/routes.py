@@ -269,7 +269,7 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
         staged_ids: list[str] = []
         for abs_path, mtype in file_iter:
             try:
-                asset = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
+                asset, ingest_result = create_asset_record(payload.tenant_id, payload.event_id, str(abs_path), mtype)
             except Exception as exc:  # noqa: BLE001
                 failed += 1
                 logger.exception("Asset create failed for %s", abs_path)
@@ -282,17 +282,21 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
                     }
                 )
                 continue
+            skipped = ingest_result != "created"
+            row_out: dict = {
+                "asset_id": asset.id,
+                "media_path": str(abs_path),
+                "media_type": mtype,
+                "insights_generated": 0,
+                "index_job_id": None,
+                "error": None,
+                "ingest_skipped": skipped,
+                "ingest_result": ingest_result,
+            }
+            assets_out.append(row_out)
+            if skipped:
+                continue
             staged_ids.append(asset.id)
-            assets_out.append(
-                {
-                    "asset_id": asset.id,
-                    "media_path": str(abs_path),
-                    "media_type": mtype,
-                    "insights_generated": 0,
-                    "index_job_id": None,
-                    "error": None,
-                }
-            )
         batch_job = None
         if staged_ids:
             try:
@@ -306,12 +310,12 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
                 failed += len(staged_ids)
                 logger.exception("Staged index job failed for event %s", payload.event_id)
                 for row in assets_out:
-                    if row.get("error") is None:
+                    if row.get("error") is None and not row.get("ingest_skipped"):
                         row["error"] = str(exc)
             else:
                 jid = batch_job.id
                 for row in assets_out:
-                    if row.get("error") is None:
+                    if row.get("error") is None and not row.get("ingest_skipped"):
                         row["index_job_id"] = jid
         audit_action(
             payload.tenant_id,
@@ -322,7 +326,7 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
         return {"batch": True, "count": len(assets_out), "failed": failed, "assets": assets_out}
 
     assert payload.media_path is not None and payload.media_type is not None
-    asset = register_asset(
+    asset, ingest_result = register_asset(
         AssetRegister(
             tenant_id=payload.tenant_id,
             event_id=payload.event_id,
@@ -330,8 +334,24 @@ def ingest_asset(payload: AssetIngestBody) -> dict:
             media_type=payload.media_type,
         )
     )
+    if ingest_result != "created":
+        return {
+            "asset_id": asset.id,
+            "insights_generated": 0,
+            "index_job_id": None,
+            "index_status": "skipped_duplicate",
+            "ingest_skipped": True,
+            "ingest_result": ingest_result,
+        }
     job = submit_index_job(asset.id, semantic_prompt=payload.semantic_prompt)
-    return {"asset_id": asset.id, "insights_generated": 0, "index_job_id": job.id, "index_status": job.status}
+    return {
+        "asset_id": asset.id,
+        "insights_generated": 0,
+        "index_job_id": job.id,
+        "index_status": job.status,
+        "ingest_skipped": False,
+        "ingest_result": ingest_result,
+    }
 
 
 @router.get("/index-jobs/{index_job_id}")

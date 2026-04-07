@@ -47,7 +47,7 @@ def test_top_extensions_orders_by_count() -> None:
     assert top == [(".mp4", 10), (".png", 10)]
 
 
-def test_sum_index_job_duration_seconds() -> None:
+def test_sum_index_job_duration_seconds(tmp_path: Path) -> None:
     from app.repositories import AssetRepository, EventRepository, IndexJobRepository, next_id
     from app.schemas import Asset, Event, IndexJob
 
@@ -68,7 +68,7 @@ def test_sum_index_job_duration_seconds() -> None:
         id=next_id("asset"),
         tenant_id="tenant_a",
         event_id=event.id,
-        media_path="test/media/dance.mp4",
+        media_path=str(tmp_path / "virtual.mp4"),
         media_type="video",
         created_at=now_utc(),
     )

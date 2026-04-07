@@ -287,6 +287,18 @@ def _stage_pct_linear(lo: int, hi: int, i: int, n: int) -> int:
     return max(lo, min(hi, int(round(v))))
 
 
+def _checkpoint_chunk_size() -> int:
+    return max(10, min(20, settings.index_checkpoint_chunk_size))
+
+
+def _flush_insight_checkpoint(batch: list[AssetInsight], accumulated: list[AssetInsight]) -> None:
+    if not batch:
+        return
+    InsightRepository.create_many(batch)
+    accumulated.extend(batch)
+    batch.clear()
+
+
 def _insights_asr_row(asset: Asset, asr_segments: list[dict]) -> AssetInsight:
     return AssetInsight(
         id=next_id("insight"),
@@ -329,6 +341,7 @@ def index_event_by_model_stages(
     event_ctx, predefined, ocr_langs = _event_context_fields(event)
 
     n_assets = len(assets)
+    chk = _checkpoint_chunk_size()
     logger.info(
         "Index pipeline: event_id=%s assets=%d — prefetch (clear insights + proxies/metadata; can take minutes on huge folders)",
         event_id,
@@ -382,15 +395,15 @@ def index_event_by_model_stages(
     for fi, st in enumerate(_iter_states()):
         st.detections, st.matches = _face_detections_and_matches(st.asset, st.analysis_media_path)
         batch_face.extend(_insights_face_rows(st.asset, st.detections, st.matches))
+        if len(batch_face) >= chk * 2:
+            _flush_insight_checkpoint(batch_face, all_insights)
         if n_assets and (fi % 25 == 0 or fi == n_assets - 1):
             _index_job_progress(
                 index_job_id,
                 _stage_pct_linear(12, 28, fi, n_assets),
                 f"Face detection · {fi + 1}/{n_assets}",
             )
-    if batch_face:
-        InsightRepository.create_many(batch_face)
-        all_insights.extend(batch_face)
+    _flush_insight_checkpoint(batch_face, all_insights)
     face_service.release()
 
     n_videos = sum(1 for s in states if s.asset.media_type == "video")
@@ -416,9 +429,9 @@ def index_event_by_model_stages(
                 )
             v_i += 1
         batch_asr.append(_insights_asr_row(st.asset, st.asr_segments))
-    if batch_asr:
-        InsightRepository.create_many(batch_asr)
-        all_insights.extend(batch_asr)
+        if len(batch_asr) >= chk:
+            _flush_insight_checkpoint(batch_asr, all_insights)
+    _flush_insight_checkpoint(batch_asr, all_insights)
     asr_service.release()
     # ASR (faster-whisper) can leave VRAM allocated until GC; free it before the VLM load.
     prepare_gpu_for_next_stage()
@@ -438,15 +451,15 @@ def index_event_by_model_stages(
         )
         assert st.vlm is not None
         batch_vlm.extend(_insights_vlm_rows(st.asset, st.vlm))
+        if len(batch_vlm) >= chk * 2:
+            _flush_insight_checkpoint(batch_vlm, all_insights)
         if n_assets and (vi % 25 == 0 or vi == n_assets - 1):
             _index_job_progress(
                 index_job_id,
                 _stage_pct_linear(38, 58, vi, n_assets),
                 f"Vision-language (VLM) · {vi + 1}/{n_assets}",
             )
-    if batch_vlm:
-        InsightRepository.create_many(batch_vlm)
-        all_insights.extend(batch_vlm)
+    _flush_insight_checkpoint(batch_vlm, all_insights)
     vlm_service.release()
     # VLM can leave most of VRAM allocated until GC; reclaim before OCR/embeddings.
     prepare_gpu_for_next_stage()
@@ -465,15 +478,15 @@ def index_event_by_model_stages(
             ocr_languages=ocr_langs,
         )
         batch_ocr.append(_insights_ocr_row(st.asset, st.ocr_items, st.ocr_model, st.run_ocr))
+        if len(batch_ocr) >= chk:
+            _flush_insight_checkpoint(batch_ocr, all_insights)
         if n_assets and (oi % 25 == 0 or oi == n_assets - 1):
             _index_job_progress(
                 index_job_id,
                 _stage_pct_linear(58, 72, oi, n_assets),
                 f"OCR · {oi + 1}/{n_assets}",
             )
-    if batch_ocr:
-        InsightRepository.create_many(batch_ocr)
-        all_insights.extend(batch_ocr)
+    _flush_insight_checkpoint(batch_ocr, all_insights)
     ocr_service.release()
     prepare_gpu_for_next_stage()
 

@@ -138,14 +138,27 @@ class EventRepository:
             return cur.rowcount > 0
 
 
+def _asset_from_row(row: sqlite3.Row) -> Asset:
+    h = row["content_sha256"] if "content_sha256" in row.keys() else None
+    return Asset(
+        id=row["id"],
+        tenant_id=row["tenant_id"],
+        event_id=row["event_id"],
+        media_path=row["media_path"],
+        media_type=row["media_type"],
+        created_at=from_iso(row["created_at"]),
+        content_sha256=str(h) if h else None,
+    )
+
+
 class AssetRepository:
     @staticmethod
     def create(asset: Asset) -> Asset:
         with db_cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO assets (id, tenant_id, event_id, media_path, media_type, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO assets (id, tenant_id, event_id, media_path, media_type, created_at, content_sha256)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     asset.id,
@@ -154,6 +167,7 @@ class AssetRepository:
                     asset.media_path,
                     asset.media_type,
                     to_iso(asset.created_at),
+                    asset.content_sha256,
                 ),
             )
         return asset
@@ -164,14 +178,25 @@ class AssetRepository:
             row = cur.execute("SELECT * FROM assets WHERE id = ?", (asset_id,)).fetchone()
         if row is None:
             return None
-        return Asset(
-            id=row["id"],
-            tenant_id=row["tenant_id"],
-            event_id=row["event_id"],
-            media_path=row["media_path"],
-            media_type=row["media_type"],
-            created_at=from_iso(row["created_at"]),
-        )
+        return _asset_from_row(row)
+
+    @staticmethod
+    def get_by_event_and_media_path(event_id: str, media_path: str) -> Asset | None:
+        with db_cursor() as cur:
+            row = cur.execute(
+                "SELECT * FROM assets WHERE event_id = ? AND media_path = ?",
+                (event_id, media_path),
+            ).fetchone()
+        return _asset_from_row(row) if row is not None else None
+
+    @staticmethod
+    def get_by_event_and_content_hash(event_id: str, content_sha256: str) -> Asset | None:
+        with db_cursor() as cur:
+            row = cur.execute(
+                "SELECT * FROM assets WHERE event_id = ? AND content_sha256 = ?",
+                (event_id, content_sha256),
+            ).fetchone()
+        return _asset_from_row(row) if row is not None else None
 
     @staticmethod
     def list_for_event(event_id: str) -> list[Asset]:
@@ -180,17 +205,7 @@ class AssetRepository:
                 "SELECT * FROM assets WHERE event_id = ? ORDER BY created_at ASC",
                 (event_id,),
             ).fetchall()
-        return [
-            Asset(
-                id=row["id"],
-                tenant_id=row["tenant_id"],
-                event_id=row["event_id"],
-                media_path=row["media_path"],
-                media_type=row["media_type"],
-                created_at=from_iso(row["created_at"]),
-            )
-            for row in rows
-        ]
+        return [_asset_from_row(row) for row in rows]
 
 
 class AssetProxyRepository:

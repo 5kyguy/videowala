@@ -91,6 +91,10 @@ class Settings(BaseModel):
     indexing_show_progress: bool = Field(default_factory=_default_indexing_progress)
     # Serial index jobs: 1 = strict single-flight indexing (PoC default).
     index_workers: int = Field(default_factory=lambda: max(1, int(os.getenv("INDEX_WORKERS", "1"))))
+    # Flush face/ASR/VLM/OCR insights every N assets (clamped 10–20) so crashes lose at most N items of in-flight work.
+    index_checkpoint_chunk_size: int = Field(
+        default_factory=lambda: max(10, min(20, int(os.getenv("INDEX_CHECKPOINT_CHUNK_SIZE", "15"))))
+    )
     # When ingest provides `semantic_prompt` for images, run photo culling with this keep fraction.
     image_index_semantic_cull_percent: float = Field(
         default_factory=lambda: float(os.getenv("IMAGE_INDEX_SEMANTIC_CULL_PERCENT", "0.5"))

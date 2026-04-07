@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -68,26 +69,81 @@ def discover_media_files(root: Path, *, recursive: bool) -> list[tuple[Path, Lit
     return out
 
 
+def file_content_sha256(path: Path, *, chunk_bytes: int = 8 * 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        while True:
+            block = f.read(chunk_bytes)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _resolve_media_path(media_path: str) -> Path:
+    p = Path(media_path)
+    if p.is_file():
+        return p.resolve()
+    return resolve_ingest_path(media_path)
+
+
+AssetIngestResult = Literal["created", "duplicate_path", "duplicate_content"]
+
+
 def create_asset_record(
     tenant_id: str,
     event_id: str,
     media_path: str,
     media_type: Literal["image", "video"],
-) -> Asset:
+) -> tuple[Asset, AssetIngestResult]:
+    path = _resolve_media_path(media_path)
+    media_path_str = str(path)
+    existing = AssetRepository.get_by_event_and_media_path(event_id, media_path_str)
+    if existing is not None:
+        audit_action(
+            tenant_id,
+            event_id,
+            "asset_ingest_skipped_duplicate",
+            {"reason": "duplicate_path", "existing_asset_id": existing.id, "media_path": media_path_str},
+        )
+        return existing, "duplicate_path"
+
+    digest = file_content_sha256(path)
+    existing_h = AssetRepository.get_by_event_and_content_hash(event_id, digest)
+    if existing_h is not None:
+        audit_action(
+            tenant_id,
+            event_id,
+            "asset_ingest_skipped_duplicate",
+            {
+                "reason": "duplicate_content",
+                "existing_asset_id": existing_h.id,
+                "media_path": media_path_str,
+                "content_sha256": digest,
+            },
+        )
+        return existing_h, "duplicate_content"
+
     asset = Asset(
         id=next_id("asset"),
         tenant_id=tenant_id,
         event_id=event_id,
-        media_path=media_path,
+        media_path=media_path_str,
         media_type=media_type,
         created_at=now_utc(),
+        content_sha256=digest,
     )
     AssetRepository.create(asset)
-    audit_action(tenant_id, event_id, "asset_registered", {"asset_id": asset.id, "media_path": media_path})
-    return asset
+    audit_action(
+        tenant_id,
+        event_id,
+        "asset_registered",
+        {"asset_id": asset.id, "media_path": media_path_str, "content_sha256": digest},
+    )
+    return asset, "created"
 
 
-def register_asset(payload: AssetRegister) -> Asset:
+def register_asset(payload: AssetRegister) -> tuple[Asset, AssetIngestResult]:
     return create_asset_record(payload.tenant_id, payload.event_id, payload.media_path, payload.media_type)
 
 

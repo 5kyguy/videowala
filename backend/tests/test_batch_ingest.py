@@ -8,6 +8,8 @@ from app.config import settings
 from app.db import reset_database_for_tests
 from app.main import app
 
+from tests.media_fixtures import write_tiny_mp4
+
 
 def setup_function() -> None:
     reset_database_for_tests("storage/test_batch_ingest.db")
@@ -65,18 +67,20 @@ def test_ingest_single_file_via_path() -> None:
     assert data["count"] == 1
 
 
-def test_legacy_single_file_body_still_works() -> None:
+def test_legacy_single_file_body_still_works(tmp_path: Path) -> None:
     client = TestClient(app)
     event = client.post(
         "/events",
         json={"tenant_id": "tenant_a", "title": "Legacy", "event_type": "party"},
     ).json()
+    vid = tmp_path / "legacy.mp4"
+    write_tiny_mp4(vid)
     resp = client.post(
         "/assets",
         json={
             "tenant_id": "tenant_a",
             "event_id": event["id"],
-            "media_path": "test/media/dance.mp4",
+            "media_path": str(vid),
             "media_type": "video",
         },
     )
@@ -84,3 +88,4 @@ def test_legacy_single_file_body_still_works() -> None:
     data = resp.json()
     assert data.get("batch") is not True
     assert "asset_id" in data
+    assert data.get("ingest_result") == "created"

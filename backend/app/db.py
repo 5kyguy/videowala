@@ -277,6 +277,17 @@ def migrate() -> None:
             )
             cur.execute("PRAGMA user_version = 10")
 
+        if version < 11:
+            cur.executescript(
+                """
+                ALTER TABLE assets ADD COLUMN content_sha256 TEXT;
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_event_content_sha256
+                ON assets(event_id, content_sha256)
+                WHERE content_sha256 IS NOT NULL;
+                """
+            )
+            cur.execute("PRAGMA user_version = 11")
+
 
 def reset_database_for_tests(path: str) -> None:
     target = Path(path)

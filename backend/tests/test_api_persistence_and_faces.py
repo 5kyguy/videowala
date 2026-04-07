@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from app.config import settings
@@ -8,6 +10,8 @@ from app.main import app
 from app.db import now_utc
 from app.repositories import RenderRepository
 from app.schemas import RenderJob
+
+from tests.media_fixtures import write_minimal_png, write_tiny_mp4
 
 
 def setup_function() -> None:
@@ -29,10 +33,14 @@ def test_events_are_persisted_across_clients() -> None:
     assert event_id in ids
 
 
-def test_face_enrollment_and_match_routes_work() -> None:
+def test_face_enrollment_and_match_routes_work(tmp_path: Path) -> None:
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Event", "event_type": "party"}).json()
     event_id = event["id"]
+    ref_png = tmp_path / "ref.png"
+    write_minimal_png(ref_png)
+    vid = tmp_path / "ingest.mp4"
+    write_tiny_mp4(vid)
 
     person_resp = client.post(
         "/persons",
@@ -43,13 +51,13 @@ def test_face_enrollment_and_match_routes_work() -> None:
 
     ref_resp = client.post(
         f"/persons/{person_id}/references",
-        json={"tenant_id": "tenant_a", "event_id": event_id, "image_path": "test/media/dance.mp4"},
+        json={"tenant_id": "tenant_a", "event_id": event_id, "image_path": str(ref_png)},
     )
     assert ref_resp.status_code == 200
 
     ingest_resp = client.post(
         "/assets",
-        json={"tenant_id": "tenant_a", "event_id": event_id, "media_path": "test/media/dance.mp4", "media_type": "video"},
+        json={"tenant_id": "tenant_a", "event_id": event_id, "media_path": str(vid), "media_type": "video"},
     )
     assert ingest_resp.status_code == 200
 
@@ -64,10 +72,12 @@ def test_face_enrollment_and_match_routes_work() -> None:
     assert "matches" in matches_resp.json()
 
 
-def test_face_endpoints_reject_cross_tenant_access() -> None:
+def test_face_endpoints_reject_cross_tenant_access(tmp_path: Path) -> None:
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Event", "event_type": "party"}).json()
     event_id = event["id"]
+    ref_png = tmp_path / "refx.png"
+    write_minimal_png(ref_png)
     person = client.post(
         "/persons",
         json={"tenant_id": "tenant_a", "event_id": event_id, "display_name": "Bob"},
@@ -75,19 +85,23 @@ def test_face_endpoints_reject_cross_tenant_access() -> None:
 
     bad_ref = client.post(
         f"/persons/{person['id']}/references",
-        json={"tenant_id": "tenant_b", "event_id": event_id, "image_path": "test/media/dance.mp4"},
+        json={"tenant_id": "tenant_b", "event_id": event_id, "image_path": str(ref_png)},
     )
     assert bad_ref.status_code == 403
 
 
-def test_event_summary_reports_dashboard_stats() -> None:
+def test_event_summary_reports_dashboard_stats(tmp_path: Path) -> None:
     client = TestClient(app)
     event = client.post("/events", json={"tenant_id": "tenant_a", "title": "Stats Event", "event_type": "party"}).json()
     event_id = event["id"]
+    vid = tmp_path / "stats.mp4"
+    write_tiny_mp4(vid)
+    ref_png = tmp_path / "stats_ref.png"
+    write_minimal_png(ref_png)
 
     ingest_resp = client.post(
         "/assets",
-        json={"tenant_id": "tenant_a", "event_id": event_id, "media_path": "test/media/dance.mp4", "media_type": "video"},
+        json={"tenant_id": "tenant_a", "event_id": event_id, "media_path": str(vid), "media_type": "video"},
     )
     assert ingest_resp.status_code == 200
 
@@ -97,7 +111,7 @@ def test_event_summary_reports_dashboard_stats() -> None:
     ).json()
     ref_resp = client.post(
         f"/persons/{person['id']}/references",
-        json={"tenant_id": "tenant_a", "event_id": event_id, "image_path": "test/media/dance.mp4"},
+        json={"tenant_id": "tenant_a", "event_id": event_id, "image_path": str(ref_png)},
     )
     assert ref_resp.status_code == 200
 
