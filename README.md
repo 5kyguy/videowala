@@ -2,6 +2,10 @@
 
 Private, AI-assisted event media curation for photographers and families.
 
+## Project status
+
+**Development on this repository is discontinued.** The proof-of-concept does not meet our quality bar with the models we can run on current hardware, and we are not pursuing stronger models via upgraded hosting at this time. The code and docs remain here for reference.
+
 ## The Problem
 
 Photographers and families capture far more media than they can efficiently review, shortlist, and edit. A single wedding, birthday, or school function can produce thousands of photos and hours of video across multiple devices. The editing burden is high, repetitive, and time-sensitive.
@@ -59,16 +63,9 @@ Upload event media, provide context, describe the desired output, and receive a 
 - person-focused montage
 - media shortlist for a human editor
 
-## Why Now
+## Why this seemed feasible (at the time)
 
-The technical ingredients are now good enough to make this credible:
-
-- open-weight multimodal models can understand both images and videos
-- open embedding models can support semantic retrieval locally
-- face, OCR, and speech pipelines are mature enough for self-hosting
-- `ffmpeg` remains a reliable deterministic backend for assembly
-
-For the current prototype direction, `HuggingFaceTB/SmolVLM2-2.2B-Instruct` is the preferred multimodal model because it is sufficient for early media-understanding workflows without the larger deployment cost of Qwen-class models.
+On paper, the stack looked viable: open-weight multimodal models, local embeddings, mature face/OCR/speech tooling, and `ffmpeg` for assembly. In practice, **models that fit our hardware were not good enough for what we wanted**, and **stepping up to heavier models would require servers we are not willing to operate for this project right now**. That gap is why the PoC stops here.
 
 ## Privacy Posture
 
@@ -77,12 +74,12 @@ For the current prototype direction, `HuggingFaceTB/SmolVLM2-2.2B-Instruct` is t
 - the system uses open-weight or self-hosted components only
 - tenant isolation is a first-class product requirement
 
-## Prototype Entry Point
+## Prototype entry point (historical)
 
-The tested multimodal prototype is now exposed as `tools/vl_cli.py`, using `HuggingFaceTB/SmolVLM2-2.2B-Instruct` by default for image and video understanding.
+The multimodal CLI lives at `tools/vl_cli.py` (default: `HuggingFaceTB/SmolVLM2-2.2B-Instruct`). It reflects the hardware-constrained model choice noted above.
 
-## This repository (Stage 1 MVP)
+## This repository (Stage 1 MVP, archived)
 
-The code here is a **single-process, synchronous** slice of the product above: FastAPI backend, SQLite, Vite + React UI (**Yarn**). **Indexing** (`POST /assets`) and **rendering** (`POST /requests/render`) run **inline** in the API—no background workers or queues yet. OCR, ASR, and semantic indexing/search are always on (Postgres + pgvector for vectors); see `docs/running.md`.
+The code is a **single-process, synchronous** slice of the original product idea: FastAPI backend, SQLite, Vite + React UI (**Yarn**). **Indexing** (`POST /assets`) and **rendering** (`POST /requests/render`) run **inline** in the API—no background workers or queues. OCR, ASR, and semantic indexing/search are always on (Postgres + pgvector for vectors); see `docs/running.md`.
 
-**Technical documentation:** start at [`docs/README.md`](docs/README.md) for links to architecture, data model, API, and how to run locally. Pitch and sizing notes live in [`docs/pitch/`](docs/pitch/).
+**Technical documentation:** start at [`docs/README.md`](docs/README.md) for architecture, data model, API, and local run instructions. Pitch and sizing notes live in [`docs/pitch/`](docs/pitch/).
